@@ -190,11 +190,16 @@ def _upload_artifacts(output: Path) -> None:
 
     with tempfile.TemporaryDirectory() as tmp:
         archive = Path(tmp) / f"{output.name}.zip"
+        # best/ holds the same weights save_model already shipped at the run
+        # root (the best checkpoint is reloaded before saving) — archiving
+        # it doubles the upload for nothing. best/best.json survives via the
+        # summary; checkpoint-*/ carry optimizer states.
+        skip_dirs = ("checkpoint-", "best")
         with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
             for f in sorted(output.rglob("*")):
                 rel = f.relative_to(output)
                 if f.is_file() and not any(
-                    part.startswith("checkpoint-") for part in rel.parts
+                    part.startswith(skip) for part in rel.parts for skip in skip_dirs
                 ):
                     zf.write(f, rel)
         parts, manifest = split_file(archive, Path(tmp) / "parts")
@@ -206,9 +211,16 @@ def _upload_artifacts(output: Path) -> None:
                   "the worker. Scores remain in the console log.")
             return
         # First pass over every part, then a second pass over the failures:
-        # the server's bad windows are transient, so a part that failed its
-        # retries often succeeds minutes later after the rest have gone up.
-        failed = [part for part in parts if not upload(part.name, str(part))]
+        # the server's bad windows are transient. The pause between parts is
+        # deliberate — the server has accepted ~100 MB from a task and then
+        # rejected everything that followed (2026-07-26 pilot), which looks
+        # like rate/budget behaviour that pacing may sit below.
+        failed = []
+        for i, part in enumerate(parts):
+            if i:
+                time.sleep(45)
+            if not upload(part.name, str(part)):
+                failed.append(part)
         if failed:
             print(f"  retrying {len(failed)} failed part(s) after a pause ...")
             time.sleep(120)
