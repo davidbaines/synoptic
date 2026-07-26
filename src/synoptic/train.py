@@ -163,6 +163,10 @@ def _upload_artifacts(output: Path, cfg: ExperimentConfig) -> None:
     """
     import os
 
+    if not os.environ.get("CLEARML_TASK_ID"):
+        # Local runs already have their weights on disk; only agent runs
+        # (ephemeral containers) need to ship them to the store.
+        return
     endpoint = os.environ.get("MINIO_ENDPOINT_URL")
     access = os.environ.get("MINIO_ACCESS_KEY")
     secret = os.environ.get("MINIO_SECRET_KEY")
