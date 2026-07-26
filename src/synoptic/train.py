@@ -51,6 +51,7 @@ from .tokenizer import load_tokenizer, train_tokenizer
 # packages land where the venv's loader cannot see them (v2 smoke attempts
 # 5-6 died on libcudnn.so.9 exactly that way).
 DEFAULT_DOCKER_IMAGE = "pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime"
+BUCKET = "nlp-research"
 
 
 def _maybe_clearml(
@@ -111,7 +112,7 @@ def _maybe_clearml(
         # index resolution, as the v1 captures did.
         from importlib import metadata
 
-        for pkg in ("torch", "transformers", "accelerate", "matplotlib"):
+        for pkg in ("torch", "transformers", "accelerate", "matplotlib", "boto3"):
             try:
                 Task.add_requirements(pkg, metadata.version(pkg))
             except metadata.PackageNotFoundError:
@@ -145,92 +146,70 @@ def _maybe_clearml(
     return task
 
 
-def _upload_artifacts(output: Path) -> None:
-    """If running under a ClearML task, upload the output dir for retrieval."""
+def _upload_artifacts(output: Path, cfg: ExperimentConfig) -> None:
+    """Upload the run directory to the shared MinIO store (the M: drive).
+
+    The store is the same bucket silnlp's rclone results use — the MinIO on
+    truenas.psonet.languagetechnology.org, mounted locally at ~/M — so run
+    directories land browsable at M/MT/experiments/synoptic/<repo>/<run>/.
+    Credentials come from the MINIO_* environment variables, present on the
+    workers (injected into the task containers) and on the local box alike.
+    The ClearML file server is NOT used for weights: it drops bulk uploads
+    unreliably (SSL EOF; thresholds drifted between 50 and 400 MB across
+    2026-07-25/26).
+
+    Intermediate trainer checkpoints (optimizer states) and best/ (duplicate
+    of the shipped weights) are skipped.
+    """
+    import os
+
+    endpoint = os.environ.get("MINIO_ENDPOINT_URL")
+    access = os.environ.get("MINIO_ACCESS_KEY")
+    secret = os.environ.get("MINIO_SECRET_KEY")
+    if not (endpoint and access and secret):
+        print("  WARNING: MINIO_* environment not set; weights stay on this "
+              "machine only (scores remain in the console log)")
+        return
     try:
-        from clearml import Task
+        import boto3
     except ImportError:
+        print("  WARNING: boto3 not installed; weights stay on this machine "
+              "only (scores remain in the console log)")
         return
-    task = Task.current_task()
-    if task is None:
-        return
-    # The archive skips intermediate trainer checkpoints: checkpoint-*/ dirs
-    # carry optimizer states (~2.4 GB each at big scale) and a 5.95 GB zip
-    # once hit ENOSPC on the file server. The final model, best/, tokenizer,
-    # validation curve and generated books all survive the filter.
-    #
-    # The file server kills uploads above the 200-400 MB band (SSL EOF; size
-    # probe 2026-07-25), so the archive travels as numbered parts under that
-    # size plus a checksum manifest (chunks.py); fetch_weights reassembles.
-    # The zip is built straight from ``output`` (no staged copy) and deleted
-    # as soon as it is split, so peak temp usage stays ~1x the archive size.
-    # Per-part retry; on a part's final failure WARN and return rather than
-    # failing the task — scores are already in the console log.
-    import json
-    import tempfile
+
+    s3 = boto3.client(
+        "s3", endpoint_url=endpoint,
+        aws_access_key_id=access, aws_secret_access_key=secret,
+    )
+    prefix = f"MT/experiments/synoptic/{cfg.root.name}/{output.name}"
+    skip_dirs = ("checkpoint-", "best")
+    files = [
+        f for f in sorted(output.rglob("*"))
+        if f.is_file() and not any(
+            part.startswith(skip)
+            for part in f.relative_to(output).parts for skip in skip_dirs
+        )
+    ]
+    total = sum(f.stat().st_size for f in files)
+    print(f"  uploading {len(files)} files ({total / 1e6:.0f} MB) to "
+          f"{BUCKET}/{prefix} ...")
     import time
-    import zipfile
 
-    from .chunks import MANIFEST_ARTIFACT, split_file
-
-    def upload(name: str, obj, attempts: int = 3) -> bool:
-        for attempt in range(1, attempts + 1):
+    for f in files:
+        key = f"{prefix}/{f.relative_to(output)}"
+        for attempt in range(1, 4):
             try:
-                # upload_artifact can also report failure by returning False
-                # (missing file, old server API) without raising.
-                if task.upload_artifact(name, artifact_object=obj, wait_on_upload=True):
-                    return True
-                print(f"  WARNING: upload of {name} attempt {attempt}/{attempts} "
-                      "was rejected (upload_artifact returned False)")
+                s3.upload_file(str(f), BUCKET, key)
+                break
             except Exception as e:  # noqa: BLE001 - any transport error
-                print(f"  WARNING: upload of {name} attempt {attempt}/{attempts} failed: {e}")
-            if attempt < attempts:
-                time.sleep(30 * attempt)
-        return False
-
-    with tempfile.TemporaryDirectory() as tmp:
-        archive = Path(tmp) / f"{output.name}.zip"
-        # best/ holds the same weights save_model already shipped at the run
-        # root (the best checkpoint is reloaded before saving) — archiving
-        # it doubles the upload for nothing. best/best.json survives via the
-        # summary; checkpoint-*/ carry optimizer states.
-        skip_dirs = ("checkpoint-", "best")
-        with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
-            for f in sorted(output.rglob("*")):
-                rel = f.relative_to(output)
-                if f.is_file() and not any(
-                    part.startswith(skip) for part in rel.parts for skip in skip_dirs
-                ):
-                    zf.write(f, rel)
-        parts, manifest = split_file(archive, Path(tmp) / "parts")
-        archive.unlink()
-        manifest_path = Path(tmp) / "run_manifest.json"
-        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-        if not upload(MANIFEST_ARTIFACT, str(manifest_path)):
-            print("  WARNING: manifest upload abandoned; weights live only on "
-                  "the worker. Scores remain in the console log.")
-            return
-        # First pass over every part, then a second pass over the failures:
-        # the server's bad windows are transient. The pause between parts is
-        # deliberate — the server has accepted ~100 MB from a task and then
-        # rejected everything that followed (2026-07-26 pilot), which looks
-        # like rate/budget behaviour that pacing may sit below.
-        failed = []
-        for i, part in enumerate(parts):
-            if i:
-                time.sleep(45)
-            if not upload(part.name, str(part)):
-                failed.append(part)
-        if failed:
-            print(f"  retrying {len(failed)} failed part(s) after a pause ...")
-            time.sleep(120)
-            failed = [part for part in failed if not upload(part.name, str(part))]
-        if failed:
-            print(f"  WARNING: {[p.name for p in failed]} abandoned after two "
-                  "passes; weights incomplete. Scores remain in the console log.")
-            return
-        print(f"  uploaded run archive as {len(parts)} parts + manifest "
-              f"to ClearML task {task.id}")
+                print(f"  WARNING: upload of {key} attempt {attempt}/3 failed: {e}")
+                if attempt == 3:
+                    print("  WARNING: giving up on this file; run directory "
+                          "incomplete on the store")
+                    return
+                time.sleep(20 * attempt)
+    print(f"  run directory stored: {BUCKET}/{prefix} "
+          f"(browsable at ~/M/{prefix})")
 
 
 def _leading_tags(src: str) -> list[str]:
@@ -523,7 +502,7 @@ def run(args) -> None:
         gargs = SimpleNamespace(beam=0, max_length=0, batch_size=args.gen_batch_size)
         generate_holdouts(output, output / "generated", gargs)
 
-    _upload_artifacts(output)
+    _upload_artifacts(output, cfg)
 
     if args.overfit:
         loss = metrics.get("eval_loss", float("inf"))

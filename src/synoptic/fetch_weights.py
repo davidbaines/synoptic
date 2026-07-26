@@ -1,15 +1,14 @@
-"""Download a remote run's chunked weight archive and reassemble it.
+"""Download a remote run's weights.
 
-    python -m synoptic.fetch_weights --task-id <id> --out weights/<run_name>
-    python -m synoptic.fetch_weights --name ms8_arabic_drafting
+    python -m synoptic.fetch_weights --run ms8_arabic_drafting
+    python -m synoptic.fetch_weights --task-id <id> --out weights/<run>
 
-Counterpart of the chunked upload in ``train._upload_artifacts``: downloads
-the checksum manifest and the part artifacts it names, verifies part and
-whole-archive checksums while streaming into the reassembled zip, extracts
-the run directory, and removes the cached part downloads. With ``--name``,
-the most recent matching task in the current repo's ClearML project (the
-repo directory name) is used. The extracted directory is what
-``synoptic.publish`` expects as a local run.
+Runs upload their directory to the shared MinIO store
+(``nlp-research/MT/experiments/synoptic/<repo>/<run>/``, browsable at
+``~/M/...``); this downloads it with the MINIO_* credentials. Tasks from the
+brief chunked-artifact era fall back to manifest+parts reassembly via
+``--task-id``. The resulting directory is what ``synoptic.publish`` expects
+as a local run.
 """
 
 from __future__ import annotations
@@ -21,6 +20,41 @@ from pathlib import Path
 
 from .chunks import MANIFEST_ARTIFACT, join_files
 from .data import repo_root
+
+BUCKET = "nlp-research"
+
+
+def fetch_s3(run: str, out_dir: Path, repo: str | None = None) -> Path:
+    """Download a run directory from the MinIO store."""
+    import os
+
+    import boto3
+
+    endpoint = os.environ.get("MINIO_ENDPOINT_URL")
+    access = os.environ.get("MINIO_ACCESS_KEY")
+    secret = os.environ.get("MINIO_SECRET_KEY")
+    if not (endpoint and access and secret):
+        raise SystemExit("MINIO_* environment variables are not set")
+    s3 = boto3.client("s3", endpoint_url=endpoint,
+                      aws_access_key_id=access, aws_secret_access_key=secret)
+    repo = repo or repo_root().name
+    prefix = f"MT/experiments/synoptic/{repo}/{run}/"
+    paginator = s3.get_paginator("list_objects_v2")
+    keys = [o["Key"] for page in paginator.paginate(Bucket=BUCKET, Prefix=prefix)
+            for o in page.get("Contents", [])]
+    if not keys:
+        raise SystemExit(f"nothing stored under {BUCKET}/{prefix}")
+    print(f"{run}: {len(keys)} files from {BUCKET}/{prefix}")
+    for key in keys:
+        target = out_dir / key.removeprefix(prefix)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        s3.download_file(BUCKET, key, str(target))
+    config = out_dir / "config.json"
+    if config.exists():
+        print(f"OK: run directory at {out_dir} (model config present)")
+    else:
+        print(f"WARNING: downloaded to {out_dir} but no config.json found")
+    return out_dir
 
 
 def _local_copy(artifacts, name: str) -> Path:
@@ -88,15 +122,21 @@ def resolve_task(task_id: str | None, name: str | None):
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Fetch and reassemble run weights")
+    ap = argparse.ArgumentParser(description="Fetch run weights")
     g = ap.add_mutually_exclusive_group(required=True)
-    g.add_argument("--task-id")
-    g.add_argument("--name", help="task name (most recent match in this "
-                                  "repo's ClearML project)")
+    g.add_argument("--run", help="run name on the MinIO store (preferred)")
+    g.add_argument("--task-id", help="chunked-artifact era task fallback")
+    g.add_argument("--name", help="task name lookup for the fallback path")
+    ap.add_argument("--repo", default=None,
+                    help="experiment repo name on the store (default: this repo)")
     ap.add_argument("--out", default=None,
                     help="directory for the run contents "
-                         "(default checkpoints/<task name>)")
+                         "(default checkpoints/<run>)")
     args = ap.parse_args()
+    if args.run:
+        out = Path(args.out) if args.out else repo_root() / "checkpoints" / args.run
+        fetch_s3(args.run, out, repo=args.repo)
+        return
     task = resolve_task(args.task_id, args.name)
     out = (Path(args.out) if args.out
            else repo_root() / "checkpoints" / task.name)
