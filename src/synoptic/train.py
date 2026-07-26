@@ -90,6 +90,15 @@ def _maybe_clearml(
     # The ClearML project is the experiment repo's directory name.
     task = Task.init(project_name=cfg.root.name, task_name=cfg.name)
     if remote_queue:
+        # Replay the full command line on the agent: with a plain-script
+        # entry point ClearML stores no arguments (Task.init runs after
+        # parse_args here, so the Args section stays empty) and the agent
+        # would rerun the script bare, dying at "--config is required".
+        # v1's module-mode entries carried argv inline; do the same.
+        entry_rel = Path(sys.argv[0]).resolve().relative_to(cfg.root.resolve())
+        task.set_script(
+            entry_point=f"{entry_rel} {' '.join(sys.argv[1:])}".strip()
+        )
         # The queue's default image (python:3.12-bullseye) breaks the agent
         # bootstrap (clearml-agent 2.0.4 imports pkg_resources, dropped by
         # setuptools>=81); a task-specified image sidesteps it.
