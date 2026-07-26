@@ -114,6 +114,13 @@ def _maybe_clearml(
                     f"{pkg} is not installed locally; remote runs capture "
                     "requirement versions from this environment"
                 )
+        # The agent installs the torch wheel without resolving its
+        # dependencies, so the CUDA runtime wheels (libcudnn & co) must be
+        # pinned explicitly as well — v1's full-freeze capture listed them.
+        for dist in metadata.distributions():
+            name = (dist.metadata["Name"] or "").lower()
+            if name.startswith("nvidia-") or name == "triton":
+                Task.add_requirements(name, dist.version)
     # The ClearML project is the experiment repo's directory name.
     task = Task.init(project_name=cfg.root.name, task_name=cfg.name)
     if remote_queue:
