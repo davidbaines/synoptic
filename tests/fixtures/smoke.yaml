@@ -1,0 +1,57 @@
+# Smoke experiment: tiny end-to-end run on the local 3090 (spec.md,
+# verification). Small model, 3 Devanagari translations, Hindi as the forced
+# source, multi-source pairing (the path this series changed), one small
+# held-out book plus the Genesis-250 verse list so a full train + generate +
+# score cycle finishes in minutes and exercises every artefact path.
+# Never an H100 run.
+name: smoke
+phase: multi-source
+
+data:
+  selection: experiments/selection-smoke.csv
+  holdouts: configs/holdouts-smoke.yaml
+  source: hin2017
+  pairing: multi-source
+  k: 3
+  k_min: 1
+  max_len: 128
+  max_src_len: 384
+  max_ratio: 0
+
+tokenizer:
+  type: bpe
+  vocab_size: 4000
+
+model:                    # deliberately tiny; NOT transformer-big
+  arch: marian
+  encoder_layers: 2
+  decoder_layers: 2
+  d_model: 256
+  encoder_attention_heads: 4
+  decoder_attention_heads: 4
+  encoder_ffn_dim: 512
+  decoder_ffn_dim: 512
+  dropout: 0.1
+  label_smoothing: 0.1
+
+training:
+  optimizer: adamw
+  lr: 5.0e-4
+  warmup_steps: 200
+  lr_scheduler: inverse_sqrt
+  max_tokens_per_batch: 8000
+  per_device_batch_size: 64
+  gradient_accumulation: 1
+  max_grad_norm: 1.0
+  bf16: true
+  max_steps: 1500
+  early_stopping_patience: 5
+  eval_every_steps: 250
+  seed: 13
+
+inference:
+  beam: 5
+  length_penalty: 1.0
+  max_length: 128
+
+oversample_holdouts: 1

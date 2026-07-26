@@ -1,0 +1,22 @@
+# Passages shown in the side-by-side sample sheets. Edit freely; names are
+# display labels, start/end are inclusive vrefs. Defaults mirror the passages
+# Liedes published, plus one NT passage for the Finnish Gospel holdout.
+passages:
+  - name: "Genesis 1:1–10"
+    start: "GEN 1:1"
+    end: "GEN 1:10"
+  - name: "Genesis 3:1–7"
+    start: "GEN 3:1"
+    end: "GEN 3:7"
+  - name: "Numbers 6:22–26"
+    start: "NUM 6:22"
+    end: "NUM 6:26"
+  - name: "Psalm 23"
+    start: "PSA 23:1"
+    end: "PSA 23:6"
+  - name: "Matthew 5:1–12"
+    start: "MAT 5:1"
+    end: "MAT 5:12"
+  - name: "Ruth (whole book)"
+    start: "RUT 1:1"
+    end: "RUT 4:22"
