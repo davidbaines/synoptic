@@ -18,12 +18,16 @@ from pathlib import Path
 
 import pandas as pd
 
+from .data import repo_root
+
 
 def scores_from_log(log: str) -> pd.DataFrame:
-    m = re.search(r"METRICS_CSV_BEGIN\n(.*?)METRICS_CSV_END", log, re.S)
-    if not m:
+    blocks = re.findall(r"METRICS_CSV_BEGIN\n(.*?)METRICS_CSV_END", log, re.S)
+    if not blocks:
         raise ValueError("no METRICS_CSV block in the console log")
-    return pd.read_csv(StringIO(m.group(1)))
+    if len(blocks) > 1:
+        print(f"note: {len(blocks)} METRICS_CSV blocks in the log; using the last")
+    return pd.read_csv(StringIO(blocks[-1]))
 
 
 def main() -> None:
@@ -43,7 +47,8 @@ def main() -> None:
     except ValueError as e:
         sys.exit(f"{e} (task {args.task_id}, status {task.status})")
 
-    out = Path(args.out) if args.out else Path("experiments") / f"scores-{task.name}.csv"
+    out = (Path(args.out) if args.out
+           else repo_root() / "experiments" / f"scores-{task.name}.csv")
     out.parent.mkdir(parents=True, exist_ok=True)
     table.to_csv(out, index=False)
     best = re.search(

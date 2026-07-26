@@ -1,4 +1,4 @@
-"""Held-out validation evaluation during training (spec-vref.md, "Training").
+"""Held-out validation evaluation during training.
 
 Every ``validation.every_steps`` optimiser steps, a fixed seeded sample of held-out
 verses is generated greedily and scored (chrF3 + BLEU per holdout language and
@@ -7,14 +7,13 @@ chrF3 has gained less than ``min_gain`` over the last ``patience_steps`` — and
 best-checkpoint selection. Everything lands in ``validation.csv`` in the run
 directory, from which curves are plotted; no external tracker is involved.
 
-The validation verses are sampled from the *validation* split, restricted to the
-target languages — never from the test pairs, so stopping and checkpoint
-selection are blind to the verses reported as scores. The prior two series
-probed test verses; that defect and this change are recorded in
-``experiments/code-review-findings.md`` (finding 1.1). Under the drafting
-condition the target's validation verses are NT verses, so the validation watches
-in-domain transfer while the reported result is cross-testament — a validation
-that stops slightly early is possible but unbiased.
+The validation verses are sampled from the *validation* split, restricted to
+the target languages — never from the test pairs, so stopping and checkpoint
+selection are blind to the verses reported as scores (the prior two series
+drew this set from test verses; 2026-07-25 review, finding 1.1). Under the
+drafting condition the target's validation verses are NT verses, so the
+curve watches in-domain transfer while the reported result is
+cross-testament — stopping slightly early is possible but unbiased.
 """
 
 from __future__ import annotations
@@ -47,18 +46,36 @@ def build_validation_set(
     verses_per_language: int,
     seed: int,
     translations: list[str] | None = None,
+    min_required: int | None = None,
 ) -> pd.DataFrame:
     """A fixed, seeded sample of verses per translation.
 
     Deterministic regardless of the incoming row order: rows are sorted by
-    (translation, vref) before sampling, so every encoding run validates the
-    same (vref, translation) pairs (spec-vref.md, verification #5b). Pass
-    ``translations`` to restrict to specific translation ids (used for the
-    seen-verse validation: the holdout languages' *trained* verses).
+    (translation, vref) before sampling, so every run of a series draws the
+    same (vref, translation) pairs. Pass ``translations`` to restrict to
+    specific translation ids (used for the seen-verse set: the holdout
+    languages' *trained* verses).
+
+    ``min_required`` makes a shortfall an error instead of a silent smaller
+    sample — the held-out validation set must be full size or the run's
+    early stopping is not comparable to its peers. When None, shortfalls are
+    allowed but reported.
     """
     frame = pairs
     if translations is not None:
         frame = frame[frame["translation"].isin(translations)]
+    counts = frame["translation"].value_counts()
+    wanted = translations if translations is not None else sorted(counts.index)
+    short = {t: int(counts.get(t, 0)) for t in wanted
+             if counts.get(t, 0) < verses_per_language}
+    if short and min_required is not None:
+        raise ValueError(
+            f"validation set needs {min_required} verses per language but "
+            f"only found {short}; raise valid_size in the holdouts YAML or "
+            f"lower validation.verses_per_language"
+        )
+    if short:
+        print(f"  note: validation sample smaller than requested for {short}")
     out = []
     for translation, sub in frame.groupby("translation", sort=True):
         sub = sub.sort_values(VREF_COLUMN, kind="stable").reset_index(drop=True)
@@ -113,13 +130,13 @@ def should_stop(
 
 
 class ValidationStopper(TrainerCallback):
-    """Probe + (optional) early-stop + best-checkpoint callback.
+    """Validation + (optional) early-stop + best-checkpoint callback.
 
     ``validation_sets`` maps a column prefix to a validation frame: the held-out set uses
     prefix ``""`` and drives best-checkpoint selection and (if enabled) early
     stopping; the seen-verse set uses prefix ``"seen_"`` and is logged only, to
     watch memorisation separately from transfer. Set ``cfg.early_stop`` False to
-    run to ``max_steps`` regardless (spec-vref.md diagnostic re-run).
+    run to ``max_steps`` regardless (diagnostic re-runs).
     """
 
     STOP_KEY = "chrF3_macro"  # column (in the held-out, unprefixed set) to stop on
@@ -134,13 +151,11 @@ class ValidationStopper(TrainerCallback):
         self.src_max_length = src_max_length  # multi-source: longer source cap
         self.csv_path = self.output / VALIDATION_CSV
         self.history: list[tuple[int, float]] = []
-        self.best: tuple[int, float] | None = None  # (step, held-out macro chrF3)
-        if self.csv_path.exists():  # resumed run: reload the curve so the
-            prior = pd.read_csv(self.csv_path)  # patience window survives
-            self.history = list(zip(prior["step"], prior[self.STOP_KEY]))
-            if len(prior):
-                i = prior[self.STOP_KEY].idxmax()
-                self.best = (int(prior.at[i, "step"]), float(prior.at[i, self.STOP_KEY]))
+        # (step, held-out macro chrF3) of the checkpoint saved in best/.
+        self.best: tuple[int, float] | None = None
+        # No resume-from-CSV: a leftover curve would seed self.best with the
+        # previous run's peak (premature stopping, stale best/ weights).
+        # train.py refuses to start into a directory that has one.
 
     def _generate(self, model, validation: pd.DataFrame) -> list[str]:
         import torch
@@ -176,7 +191,13 @@ class ValidationStopper(TrainerCallback):
         )
         held_out_macro = row[self.STOP_KEY]
         self.history.append((step, held_out_macro))
-        if self.best is None or held_out_macro > self.best[1]:
+        # ``best`` always describes the checkpoint in best/ on disk, so what
+        # train.py reloads and reports is exactly what was saved. The ~GB
+        # checkpoint is rewritten only when the gain clears save_min_gain
+        # (early training improves at nearly every evaluation; unconditional
+        # saves hammer the disk for nothing). The stop rule reads ``history``,
+        # so small unsaved improvements still count toward patience.
+        if self.best is None or held_out_macro - self.best[1] >= self.cfg.save_min_gain:
             self.best = (step, held_out_macro)
             best_dir = self.output / BEST_DIR
             model.save_pretrained(best_dir)

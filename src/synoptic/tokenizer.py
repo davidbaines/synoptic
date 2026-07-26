@@ -1,4 +1,4 @@
-"""SentencePiece tokeniser training (spec.md, "Tokenisation").
+"""SentencePiece tokeniser training.
 
 BPE with byte fallback; language tags registered as user-defined symbols so
 they stay atomic. The training corpus must come from the training split only —

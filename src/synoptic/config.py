@@ -75,11 +75,9 @@ class ModelConfig:
 
 @dataclass
 class TrainingConfig:
-    optimizer: str = "adamw"
     lr: float = 5.0e-4
     warmup_steps: int = 4000
     lr_scheduler: str = "inverse_sqrt"
-    max_tokens_per_batch: int = 16000
     gradient_accumulation: int = 2
     max_grad_norm: float = 1.0
     bf16: bool = True
@@ -87,10 +85,8 @@ class TrainingConfig:
     early_stopping_patience: int = 5
     eval_every_steps: int = 2000
     seed: int = 13
-    gradient_checkpointing: bool = False
-    # Batch is sized by sentence count on the smaller dev GPU; the training
-    # script derives it from max_tokens_per_batch unless this is set.
-    per_device_batch_size: int | None = None
+    gradient_checkpointing: bool = False   # OOM fallback; passed to the trainer
+    per_device_batch_size: int | None = None   # default 16 when unset
 
 
 @dataclass
@@ -102,23 +98,35 @@ class InferenceConfig:
 
 @dataclass
 class ValidationConfig:
-    """Validation-set evaluation during training (spec-vref.md, "Training").
+    """Validation-set evaluation during training.
 
     Present in a config's ``validation:`` section => evaluation runs every
-    ``every_steps``, drive early stopping on macro chrF3 and select the best
-    checkpoint; the loss-based EarlyStoppingCallback is then disabled.
+    ``every_steps``, drives early stopping on macro chrF3 and selects the best
+    checkpoint; the loss-based EarlyStoppingCallback is then disabled. The
+    validation verses come from the validation split (disjoint from train and
+    test), restricted to the target languages.
     """
 
     every_steps: int = 1000
     verses_per_language: int = 250
     min_gain: float = 0.2          # macro chrF3 must gain this much ... (silnlp default)
     patience_steps: int = 4000     # ... within this many steps, else stop (silnlp default)
+    # The best checkpoint is rewritten only when macro chrF3 improves by at
+    # least this much over the saved best (a full model write otherwise
+    # happens at nearly every early-training evaluation).
+    save_min_gain: float = 0.05
     batch_size: int = 64
     seed: int = 13
     early_stop: bool = True         # False => run to max_steps, evaluate throughout
     # Also evaluate SEEN (trained) verses of the holdout languages, to watch
-    # memorisation separately from held-out transfer (spec-vref.md). 0 disables.
+    # memorisation separately from held-out transfer. 0 disables.
     seen_verses_per_language: int = 250
+
+
+TOP_LEVEL_SECTIONS = frozenset(
+    {"name", "phase", "data", "tokenizer", "model", "training", "inference",
+     "validation"}
+)
 
 
 @dataclass
@@ -131,29 +139,51 @@ class ExperimentConfig:
     training: TrainingConfig
     inference: InferenceConfig
     validation: ValidationConfig | None = None
-    oversample_holdouts: int = 1
     path: Path | None = None
 
     @classmethod
     def load(cls, path: str | Path) -> "ExperimentConfig":
         path = Path(path)
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+        unknown = set(raw) - TOP_LEVEL_SECTIONS
+        if unknown:
+            # A silently ignored section can disable whole subsystems (a
+            # predecessor-era `probe:` would turn validation off unnoticed).
+            raise ValueError(
+                f"{path}: unknown top-level section(s) {sorted(unknown)}; "
+                f"known: {sorted(TOP_LEVEL_SECTIONS)}"
+            )
+        section = lambda key: raw.get(key) or {}  # a bare `key:` parses to None
         return cls(
             name=raw["name"],
             phase=raw.get("phase", ""),
-            data=DataConfig(**_only_known(DataConfig, raw["data"])),
-            tokenizer=TokenizerConfig(**_only_known(TokenizerConfig, raw.get("tokenizer", {}))),
-            model=ModelConfig(**_only_known(ModelConfig, raw.get("model", {}))),
-            training=TrainingConfig(**_only_known(TrainingConfig, raw.get("training", {}))),
-            inference=InferenceConfig(**_only_known(InferenceConfig, raw.get("inference", {}))),
+            data=DataConfig(**_only_known(DataConfig, section("data"))),
+            tokenizer=TokenizerConfig(**_only_known(TokenizerConfig, section("tokenizer"))),
+            model=ModelConfig(**_only_known(ModelConfig, section("model"))),
+            training=TrainingConfig(**_only_known(TrainingConfig, section("training"))),
+            inference=InferenceConfig(**_only_known(InferenceConfig, section("inference"))),
             validation=(
-                ValidationConfig(**_only_known(ValidationConfig, raw["validation"]))
+                ValidationConfig(**_only_known(ValidationConfig, section("validation")))
                 if "validation" in raw else None
             ),
-            oversample_holdouts=int(raw.get("oversample_holdouts", 1)),
             path=path,
         )
 
+    @property
+    def root(self) -> Path:
+        """The experiment repo this config belongs to.
+
+        Derived from the config file's own location when it follows the
+        ``<repo>/configs/experiments/<name>.yaml`` convention, so runs read
+        the selections and holdouts BESIDE the config even when launched
+        from another directory; otherwise falls back to ``repo_root()``.
+        """
+        if self.path is not None:
+            candidate = self.path.resolve().parent.parent.parent
+            if (candidate / "configs").is_dir():
+                return candidate
+        return repo_root()
+
     def resolve(self, relative: str) -> Path:
         """Resolve a repo-relative config path (e.g. the selection CSV)."""
-        return repo_root() / relative
+        return self.root / relative

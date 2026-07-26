@@ -1,4 +1,4 @@
-"""Publish a trained run to the Hugging Face Hub (spec.md, "Publishing").
+"""Publish a trained run to the Hugging Face Hub.
 
     uv run python -m synoptic.publish --run checkpoints/ie_base --dry-run
 
@@ -40,6 +40,12 @@ def default_repo_id(name: str) -> str:
 
 
 def git_commit() -> str:
+    """The EXPERIMENT repo's commit (configs, selections, holdouts).
+
+    The training-code version is the synoptic package version, recorded
+    separately on the model card — repo_root() is the caller's repo, not
+    this package's checkout.
+    """
     try:
         return subprocess.check_output(
             ["git", "rev-parse", "HEAD"], cwd=repo_root(), text=True
@@ -112,7 +118,7 @@ def assemble(run: Path, staging: Path, allow_nc: bool) -> dict:
     holdouts, verse_holdouts, _, seed = load_holdouts(cfg)
 
     # The run's actual source translation: never a hardcoded language
-    # (experiments/code-review-findings.md, finding 1.6).
+    # (2026-07-25 review, finding 1.6).
     source_id = cfg.data.source
     src_rows = selection[selection["translationId"] == source_id]
     if len(src_rows):

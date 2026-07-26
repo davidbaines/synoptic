@@ -1,4 +1,4 @@
-"""Licence policy for publishing derived models (spec.md, "Publishing").
+"""Licence policy for publishing derived models.
 
 The eBible metadata marks every translation ``Redistributable = True``, which
 only means the source text may be redistributed. It says nothing about whether

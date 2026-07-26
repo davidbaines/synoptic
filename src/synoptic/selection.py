@@ -1,4 +1,4 @@
-"""Criteria-driven translation selection (spec.md, "Translation selection").
+"""Criteria-driven translation selection.
 
 Selection is reproducible: criteria live in a YAML config, the curated
 language-family map lives in ``configs/language_families.csv``, and the
@@ -27,7 +27,7 @@ class SelectionConfig:
     exclude: list[str] = field(default_factory=list)  # translationIds forced out
     min_verses: int = 1000
     one_per_language: bool = True
-    # Complete-NT pool rule (spec.md, "Family pools"): only translations with
+    # Complete-NT pool rule: only translations with
     # at least this many NT books qualify, and the one-per-language dedupe
     # runs after the filter so an OT-heavy incomplete-NT edition can never
     # shadow a complete-NT one. None disables (prior series' behaviour).
@@ -122,14 +122,21 @@ def select_translations(
     return result
 
 
-def write_selection(selection: pd.DataFrame, name: str) -> Path:
-    """Write a committed selection list under experiments/."""
+def write_selection(selection: pd.DataFrame, name: str,
+                    extra_cols: list[str] | None = None) -> Path:
+    """Write a committed selection list under experiments/.
+
+    ``extra_cols`` appends columns beyond the standard set (e.g. the script
+    pools' ``licence``/``ntOnly``) while keeping one path scheme and column
+    order for every ``selection-*.csv``.
+    """
     out_dir = repo_root() / "experiments"
-    out_dir.mkdir(exist_ok=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"selection-{name}.csv"
     cols = [
         "translationId", "languageCode", "languageNameInEnglish", "family",
         "script", "OTverses", "NTverses", "DCverses", "totalVerses",
+        *(extra_cols or []),
     ]
     selection[[c for c in cols if c in selection.columns]].to_csv(
         out_path, index=False

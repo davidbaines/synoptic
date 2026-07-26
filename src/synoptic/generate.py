@@ -1,4 +1,4 @@
-"""Generation, scoring and sample sheets (spec.md, "Inference"/"Evaluation").
+"""Generation, scoring and sample sheets.
 
     uv run python -m synoptic.generate --run checkpoints/pilot
 
@@ -168,7 +168,7 @@ def generate_holdouts(run_dir: Path, out_dir: Path, args) -> pd.DataFrame:
     return table
 
 
-# Named test-set aggregates (spec.md, "Test sets"): the epistle set spans
+# Named test-set aggregates: the epistle set spans
 # three books; the whole-OT aggregate spans every generated OT book. Mark and
 # Genesis-250 are single-book test sets, so their plain book rows suffice.
 EPISTLE_BOOKS = ("JAS", "1PE", "2PE")

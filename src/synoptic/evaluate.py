@@ -1,4 +1,4 @@
-"""Metrics per silnlp/machine.py conventions (spec.md, "Evaluation").
+"""Metrics per silnlp/machine.py conventions.
 
 chrF3 (headline), chrF3+, chrF3++, spBLEU (Flores-200 tokeniser) and BLEU,
 all via sacreBLEU. Scores are corpus-level per held-out book per language.
@@ -45,7 +45,7 @@ def score(hypotheses: Sequence[str], references: Sequence[str]) -> dict[str, flo
 def trivial_baselines(
     sources: Sequence[str], references: Sequence[str]
 ) -> dict[str, dict[str, float]]:
-    """Baselines any real system must beat (spec.md verification #6).
+    """Baselines any real system must beat.
 
     ``source-copy``: emit the (untagged) source verse unchanged.
     """
@@ -55,7 +55,7 @@ def trivial_baselines(
 def best_reference_baseline(
     references: Sequence[str], candidates: dict[str, Sequence[str]]
 ) -> tuple[str, float]:
-    """Strongest "copy another language" baseline (spec.md verification #6).
+    """Strongest "copy another language" baseline.
 
     ``candidates`` maps a language label to that language's text for the same
     verses, aligned to ``references``. Returns the label and chrF3 of the

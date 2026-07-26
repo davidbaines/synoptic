@@ -1,4 +1,4 @@
-"""Pool selection over a membership CSV (spec.md, "Family pools").
+"""Pool selection over a membership CSV.
 
 Take every eBible language whose ISO 639-3 code is listed in a membership file
 (``configs/families/<family>.csv``, or any CSV of the same shape via
@@ -24,7 +24,7 @@ from .licensing import is_shareable, licence_of
 from .selection import SelectionConfig, load_families, select_translations, write_selection
 
 MIN_VERSES = 5000
-MIN_NT_BOOKS = 27   # the complete-NT pool rule (spec.md, "Family pools")
+MIN_NT_BOOKS = 27   # the complete-NT pool rule
 
 
 def load_family_codes(family: str) -> dict[str, str]:
@@ -87,7 +87,7 @@ def build_family_selection(
 
     if shareable_only:
         # Restrict to licences that permit sharing a derived model, so the
-        # resulting run is publishable (spec.md, "Constraints"). A
+        # resulting run is publishable. A
         # non-shareable target is an error, not a drop.
         lic = licence_of(candidates["translationId"], meta)
         bad = [

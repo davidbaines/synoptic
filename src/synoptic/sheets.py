@@ -1,4 +1,4 @@
-"""Side-by-side generated-vs-reference sample sheets (spec.md, "Evaluation").
+"""Side-by-side generated-vs-reference sample sheets.
 
 Passages are user-configurable in ``configs/passages.yaml``; defaults mirror
 the passages Liedes published on his blog.

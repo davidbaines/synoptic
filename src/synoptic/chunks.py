@@ -26,15 +26,24 @@ def sha256_file(path: Path) -> str:
 
 
 def split_file(path: Path, out_dir: Path, part_size: int = PART_SIZE) -> tuple[list[Path], dict]:
-    """Split ``path`` into numbered parts; return (part paths, manifest)."""
+    """Split ``path`` into numbered parts; return (part paths, manifest).
+
+    Single pass: whole-file and per-part digests are computed from the chunks
+    as they are written (re-hashing a ~1.5 GB archive after writing would
+    read everything twice more).
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
     parts: list[Path] = []
+    part_hashes: list[str] = []
+    whole = hashlib.sha256()
     with open(path, "rb") as f:
         i = 0
         while True:
             chunk = f.read(part_size)
             if not chunk:
                 break
+            whole.update(chunk)
+            part_hashes.append(hashlib.sha256(chunk).hexdigest())
             part = out_dir / f"{PART_PREFIX}{i:03d}"
             part.write_bytes(chunk)
             parts.append(part)
@@ -42,27 +51,39 @@ def split_file(path: Path, out_dir: Path, part_size: int = PART_SIZE) -> tuple[l
     manifest = {
         "file_name": path.name,
         "size": path.stat().st_size,
-        "sha256": sha256_file(path),
+        "sha256": whole.hexdigest(),
         "parts": len(parts),
-        "part_sha256": [sha256_file(p) for p in parts],
+        "part_sha256": part_hashes,
+        # Exact artifact names, so a fetch never depends on the fetch-time
+        # library agreeing with the upload-time naming scheme.
+        "part_names": [p.name for p in parts],
     }
     return parts, manifest
 
 
 def join_files(parts: list[Path], manifest: dict, out_path: Path) -> Path:
-    """Concatenate downloaded parts and verify against the manifest."""
+    """Concatenate downloaded parts and verify against the manifest.
+
+    Streaming single pass: each part is read in 1 MB blocks that feed the
+    per-part digest, the whole-file digest and the output file at once; a
+    corrupt part aborts at that part, before the rest is read.
+    """
     if len(parts) != manifest["parts"]:
         raise ValueError(f"expected {manifest['parts']} parts, got {len(parts)}")
-    for i, part in enumerate(parts):
-        got = sha256_file(part)
-        want = manifest["part_sha256"][i]
-        if got != want:
-            raise ValueError(f"part {i} checksum mismatch: {got} != {want}")
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    whole = hashlib.sha256()
     with open(out_path, "wb") as out:
-        for part in parts:
-            out.write(part.read_bytes())
-    got = sha256_file(out_path)
+        for i, part in enumerate(parts):
+            per_part = hashlib.sha256()
+            with open(part, "rb") as f:
+                for block in iter(lambda: f.read(1 << 20), b""):
+                    per_part.update(block)
+                    whole.update(block)
+                    out.write(block)
+            got, want = per_part.hexdigest(), manifest["part_sha256"][i]
+            if got != want:
+                raise ValueError(f"part {i} checksum mismatch: {got} != {want}")
+    got = whole.hexdigest()
     if got != manifest["sha256"]:
         raise ValueError(f"reassembled checksum mismatch: {got} != {manifest['sha256']}")
     return out_path

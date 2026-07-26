@@ -77,3 +77,17 @@ def test_apply_nt_truncation_blanks_ot_cells():
     assert out.at["MAT 1:1", "a"] == "nt"      # keeps NT
     assert out.at["GEN 1:1", "b"] == "ot"      # exempt member untouched
     assert verses.at["GEN 1:1", "a"] == "ot"   # input not mutated
+
+
+def test_target_survives_dedupe_against_bigger_sibling():
+    # Reproduced in review: groupby-first dedupe dropped a forced target when
+    # a same-language sibling had more verses; select_translations protects it.
+    meta = _meta()
+    swh_target = PoolSpec(
+        script="Latin", targets=["swhsmall"],
+        languages=["swh"], one_per_language=True,
+    )
+    pool = build_pool(swh_target, metadata=meta)
+    ids = set(pool["translationId"])
+    assert "swhsmall" in ids           # the forced target survives
+    assert "swhbig" not in ids         # its language slot is taken by the target

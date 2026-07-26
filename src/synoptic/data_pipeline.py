@@ -6,8 +6,7 @@ that generation scores the held-out material the model was actually kept away
 from. This module is that single source of truth.
 
 Unlike bible-interlingua there is no composite Greek: ``cfg.data.source`` is
-always a translation id — the alignment-chosen in-script source (spec.md,
-"Source"). Holdout YAMLs may carry a ``verse_holdouts`` section mapping a
+always a translation id — the alignment-chosen in-script source. Holdout YAMLs may carry a ``verse_holdouts`` section mapping a
 translation to committed vref-list files (e.g. Genesis-250).
 """
 
@@ -59,7 +58,7 @@ def load_holdouts(
     for translation, files in (raw.get("verse_holdouts") or {}).items():
         vrefs: list[str] = []
         for f in files:
-            vrefs.extend(load_vref_list(repo_root() / f))
+            vrefs.extend(load_vref_list(cfg.resolve(f)))
         verse_holdouts[translation] = vrefs
     return holdouts, verse_holdouts, int(raw.get("valid_size", 5000)), int(raw.get("seed", 13))
 
@@ -68,7 +67,7 @@ def apply_nt_truncation(verses: pd.DataFrame, selection: pd.DataFrame) -> pd.Dat
     """Blank non-NT cells of every selection member marked ``ntOnly``.
 
     The Latin control truncates non-source, non-target members to their NT so
-    the pool structure mirrors Devanagari (spec.md, "Scripts and pools").
+    the pool structure mirrors Devanagari.
     Applied before splitting, so truncated cells can never train, validate,
     or feed the source side.
     """

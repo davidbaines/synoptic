@@ -1,4 +1,4 @@
-"""Hugging Face packaging helpers (spec.md, "Publishing").
+"""Hugging Face packaging helpers.
 
 Two jobs the publish command delegates here: turning our raw SentencePiece
 model into a ``MarianTokenizer`` that loads with ``from_pretrained``, and
@@ -113,6 +113,7 @@ def build_model_card(
     forced-first source translation (from the experiment config) — the card
     must never claim a source the training data does not contain.
     """
+    from . import __version__ as synoptic_version
     languages = sorted(set(licences["languageCode"]))
     tags = ["translation", "bible", "marian", "multilingual", "from-scratch"]
     header = _yaml_metadata(languages, model_licence, tags)
@@ -204,7 +205,8 @@ below.
 ## Reproducibility
 
 - Experiment: `{experiment}`
-- Git commit: `{git_commit}`
+- Experiment repo commit: `{git_commit}`
+- Training code: synoptic `{synoptic_version}`
 - Random seed: `{seed}`
 
 The full training and evaluation code, configuration and selection list are in

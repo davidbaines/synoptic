@@ -1,4 +1,4 @@
-"""From-scratch encoder-decoder model construction (spec.md, "Model").
+"""From-scratch encoder-decoder model construction.
 
 A randomly-initialised MarianMT-style transformer. Transformer-big scale comes
 from the YAML config; the smoke config shrinks every dimension for the 3090.

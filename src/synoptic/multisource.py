@@ -1,4 +1,4 @@
-"""Multi-source pair building (spec.md, "Design").
+"""Multi-source pair building.
 
 One-to-many pairs each target verse with the fixed source translation;
 multi-source concatenates n renderings of the SAME verse into one source line:
@@ -10,7 +10,7 @@ to the one-to-many baseline. The atomic language tags are the separators.
 
 Unlike the bible-interlingua series, the forced-first source is not an
 out-of-pool composite (Greek) but a pool member — a translation id from the
-selection, chosen by alignment (spec.md, "Source"). It is forced first
+selection, chosen by alignment. It is forced first
 whenever its cell at that vref is usable and it is not itself the target.
 
 Sampling (training): n ~ Uniform{k_min..k} per example — k_min=1 is the
@@ -119,8 +119,7 @@ def build_ms_pairs(
 
     ``forbidden`` is the set of held-out (vref, translation) cells; every pick
     is asserted against it, so the source-side leakage rule is enforced at
-    pair-build time rather than only holding by construction (spec.md,
-    Verification).
+    pair-build time rather than only holding by construction.
 
     Returns columns vref, translation, src, tgt — the same shape one-to-many
     produces, so everything downstream (tokeniser, datasets, validation sets) is

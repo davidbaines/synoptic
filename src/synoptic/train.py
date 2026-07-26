@@ -1,13 +1,18 @@
-"""Training entry point (spec.md, "Training").
+"""Training entry point.
 
-    uv run python -m synoptic.train --config configs/experiments/pilot.yaml
+    .venv/bin/python scripts/train.py --config configs/experiments/pilot.yaml
+
+(Experiment repos wrap ``synoptic.train.main`` in a thin ``scripts/train.py``
+so ClearML remote execution captures the EXPERIMENT repo — running
+``python -m synoptic.train --remote-queue ...`` would make ClearML detect the
+synoptic checkout instead, and the agent's clone would lack the configs.)
 
 HF ``Seq2SeqTrainer`` on a randomly-initialised MarianMT model, bf16, label
 smoothing, inverse-sqrt schedule. The tokeniser is trained here on the training
 split only and saved beside the checkpoint so generation reuses it. ClearML
 logging is opt-in (``--clearml``) and degrades gracefully if unavailable.
 
-Two sanity modes back the verification plan (spec.md #4):
+One sanity mode backs the verification plan:
   --overfit N   train on N pairs only; final loss must fall near zero.
 """
 
@@ -16,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import sys
 from pathlib import Path
 
 from .config import ExperimentConfig
@@ -53,19 +59,33 @@ def _maybe_clearml(
             raise SystemExit("clearml is required for --remote-queue; install the train extra")
         print("clearml not installed; skipping experiment tracking")
         return None
-    # The ClearML project is the repo directory name, so vendored copies of
-    # this file log to their own series' project without an edit.
-    task = Task.init(project_name=repo_root().name, task_name=cfg.name)
+    if remote_queue:
+        # ClearML detects the repo to clone from the entry-point file
+        # (sys.argv[0]); with synoptic installed as a dependency that file
+        # must live in the EXPERIMENT repo or the agent clones the wrong one.
+        entry = Path(sys.argv[0]).resolve()
+        if cfg.root.resolve() not in entry.parents:
+            raise SystemExit(
+                f"--remote-queue requires an entry script inside the "
+                f"experiment repo {cfg.root} so ClearML captures that repo; "
+                f"run via the repo's scripts/train.py wrapper "
+                f"(entry point was {entry})"
+            )
+        # The requirements capture records synoptic as a bare name==version,
+        # which pip would resolve from PyPI (a different project). Pin the
+        # git source explicitly for the agent.
+        from . import GIT_REQUIREMENT
+
+        Task.add_requirements(GIT_REQUIREMENT)
+    # The ClearML project is the experiment repo's directory name.
+    task = Task.init(project_name=cfg.root.name, task_name=cfg.name)
     if remote_queue:
         # The queue's default image (python:3.12-bullseye) breaks the agent
         # bootstrap (clearml-agent 2.0.4 imports pkg_resources, dropped by
-        # setuptools>=81); a task-specified image sidesteps it. PYTHONPATH=src
-        # makes the src-layout package importable in the agent's repo clone
-        # without installing it.
+        # setuptools>=81); a task-specified image sidesteps it.
         task.set_base_docker(
             docker_image=docker_image or DEFAULT_DOCKER_IMAGE,
             docker_arguments=(
-                "-e PYTHONPATH=src "
                 # ie_big at batch 256 died with 5.6 GiB reserved-but-unallocated;
                 # expandable segments avoids that fragmentation on long batches.
                 "-e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
@@ -85,39 +105,50 @@ def _upload_artifacts(output: Path) -> None:
     task = Task.current_task()
     if task is None:
         return
-    # Upload the run directory minus intermediate trainer checkpoints:
-    # checkpoint-*/ dirs carry optimizer states (~2.4 GB each at big scale) and
-    # the full 5.95 GB ie_big zip hit ENOSPC on the file server, losing the
-    # whole artifact. The final model, best/, tokenizer, validation curve and
-    # generated books all survive the filter. Staged copy is temporary, so the
-    # upload must complete before it is deleted.
-    import tempfile
-
+    # The archive skips intermediate trainer checkpoints: checkpoint-*/ dirs
+    # carry optimizer states (~2.4 GB each at big scale) and a 5.95 GB zip
+    # once hit ENOSPC on the file server. The final model, best/, tokenizer,
+    # validation curve and generated books all survive the filter.
+    #
     # The file server kills uploads above the 200-400 MB band (SSL EOF; size
     # probe 2026-07-25), so the archive travels as numbered parts under that
     # size plus a checksum manifest (chunks.py); fetch_weights reassembles.
+    # The zip is built straight from ``output`` (no staged copy) and deleted
+    # as soon as it is split, so peak temp usage stays ~1x the archive size.
     # Per-part retry; on a part's final failure WARN and return rather than
     # failing the task — scores are already in the console log.
     import json
+    import tempfile
     import time
+    import zipfile
 
     from .chunks import MANIFEST_ARTIFACT, split_file
 
     def upload(name: str, obj) -> bool:
         for attempt in range(1, 5):
             try:
-                task.upload_artifact(name, artifact_object=obj, wait_on_upload=True)
-                return True
+                # upload_artifact can also report failure by returning False
+                # (missing file, old server API) without raising.
+                if task.upload_artifact(name, artifact_object=obj, wait_on_upload=True):
+                    return True
+                print(f"  WARNING: upload of {name} attempt {attempt}/4 "
+                      "was rejected (upload_artifact returned False)")
             except Exception as e:  # noqa: BLE001 - any transport error
                 print(f"  WARNING: upload of {name} attempt {attempt}/4 failed: {e}")
-                time.sleep(30 * attempt)
+            time.sleep(30 * attempt)
         return False
 
     with tempfile.TemporaryDirectory() as tmp:
-        staged = Path(tmp) / output.name
-        shutil.copytree(output, staged, ignore=shutil.ignore_patterns("checkpoint-*"))
-        archive = Path(shutil.make_archive(str(Path(tmp) / output.name), "zip", staged))
+        archive = Path(tmp) / f"{output.name}.zip"
+        with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
+            for f in sorted(output.rglob("*")):
+                rel = f.relative_to(output)
+                if f.is_file() and not any(
+                    part.startswith("checkpoint-") for part in rel.parts
+                ):
+                    zf.write(f, rel)
         parts, manifest = split_file(archive, Path(tmp) / "parts")
+        archive.unlink()
         manifest_path = Path(tmp) / "run_manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
         if not upload(MANIFEST_ARTIFACT, str(manifest_path)):
@@ -178,19 +209,16 @@ def train_tokenizer_for(cfg: ExperimentConfig, train_pairs, output: Path):
     return load_tokenizer(model_path)
 
 
-def build_training_args(cfg: ExperimentConfig, output: Path, args):
+def build_training_args(cfg: ExperimentConfig, output: Path, args,
+                        validation_driven: bool):
     from transformers import Seq2SeqTrainingArguments
 
     per_device = cfg.training.per_device_batch_size or 16
     max_steps = args.max_steps if args.max_steps else cfg.training.max_steps
     eval_steps = min(cfg.training.eval_every_steps, max_steps)
-    # When validation eval drives stopping and best-checkpoint selection, we handle
-    # "best" ourselves (validation.ValidationStopper), so HF must not also try to reload
-    # an eval_loss-best checkpoint at the end.
-    validation_driven = cfg.validation is not None and not args.overfit
     # Label smoothing floors the loss well above zero, which hides whether the
     # loop is actually memorising the overfit subset; turn it off there so the
-    # near-zero-loss check (spec.md #4) is meaningful.
+    # near-zero-loss check is meaningful.
     label_smoothing = 0.0 if args.overfit else cfg.model.label_smoothing
     return Seq2SeqTrainingArguments(
         output_dir=str(output),
@@ -209,9 +237,13 @@ def build_training_args(cfg: ExperimentConfig, output: Path, args):
         save_strategy="steps",
         save_steps=eval_steps,
         save_total_limit=2,
+        # When validation drives stopping and best-checkpoint selection we
+        # handle "best" ourselves (ValidationStopper), so HF must not also
+        # reload an eval_loss-best checkpoint at the end.
         load_best_model_at_end=not validation_driven,
         metric_for_best_model="eval_loss",
         greater_is_better=False,
+        gradient_checkpointing=cfg.training.gradient_checkpointing,
         logging_steps=max(1, min(50, max_steps // 10)),
         seed=cfg.training.seed,
         report_to=["clearml"] if args.clearml else [],
@@ -223,8 +255,19 @@ def build_training_args(cfg: ExperimentConfig, output: Path, args):
 
 def run(args) -> None:
     cfg = ExperimentConfig.load(args.config)
-    output = Path(args.output_dir) if args.output_dir else repo_root() / "checkpoints" / cfg.name
+    output = Path(args.output_dir) if args.output_dir else cfg.root / "checkpoints" / cfg.name
     output.mkdir(parents=True, exist_ok=True)
+    from .validation import BEST_DIR, VALIDATION_CSV
+
+    stale = [n for n in (VALIDATION_CSV, BEST_DIR) if (output / n).exists()]
+    if stale:
+        # A leftover validation curve or best/ checkpoint would be read as
+        # this run's state: the stopper would inherit the old best score and
+        # save_model could ship the previous run's weights.
+        raise SystemExit(
+            f"{output} contains a previous run's state ({', '.join(stale)}); "
+            "delete the directory or pass a fresh --output-dir"
+        )
 
     _maybe_clearml(cfg, args.clearml, args.remote_queue, args.docker_image)
 
@@ -241,7 +284,7 @@ def run(args) -> None:
         )
 
         # Held-out cells, asserted against every source-side pick below
-        # (spec.md, Verification: source-side leakage).
+        # (verification: source-side leakage).
         forbidden = set(
             zip(data.splits.test[VREF_COLUMN], data.splits.test["translation"])
         )
@@ -258,16 +301,12 @@ def run(args) -> None:
         ranking = inference_source_ranking(
             data.selection, policy=cfg.data.companion_ranking
         )
-        data.valid_pairs = to_ms_sources(
-            data.valid_pairs, data.verses, data.language_of,
-            present, ranking, k=cfg.data.k, source_id=data.source_id,
-            forbidden=forbidden,
-        )
-        data.test_pairs = to_ms_sources(
-            data.test_pairs, data.verses, data.language_of,
-            present, ranking, k=cfg.data.k, source_id=data.source_id,
-            forbidden=forbidden,
-        )
+        for frame_attr in ("valid_pairs", "test_pairs"):
+            setattr(data, frame_attr, to_ms_sources(
+                getattr(data, frame_attr), data.verses, data.language_of,
+                present, ranking, k=cfg.data.k, source_id=data.source_id,
+                forbidden=forbidden,
+            ))
         print(f"  multi-source (K={cfg.data.k}, k_min={cfg.data.k_min}, "
               f"companions={cfg.data.companion_ranking}): "
               f"{len(train_source_pairs)} training pairs")
@@ -304,44 +343,34 @@ def run(args) -> None:
     valid_ds = PairDataset(valid_pairs, sp, cfg.data.max_len, cfg.data.max_src_len)
     collator = Collator(pad_id=sp.pad_id())
 
-    max_pos = max(cfg.data.max_src_len or 0, cfg.data.max_len) + 4
+    # Position table must cover the longest sequence any phase produces:
+    # training sources/targets AND inference-time decoding.
+    max_pos = max(cfg.data.max_src_len or 0, cfg.data.max_len,
+                  cfg.inference.max_length) + 4
     model = build_model(cfg.model, sp, max_position_embeddings=max_pos)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"  model: {cfg.model.arch} {n_params/1e6:.1f}M params")
 
     from transformers import EarlyStoppingCallback, Seq2SeqTrainer
 
-    targs = build_training_args(cfg, output, args)
     validation_driven = cfg.validation is not None and not args.overfit
+    targs = build_training_args(cfg, output, args, validation_driven)
     callbacks = []
     stopper = None
     if validation_driven:
         from .validation import ValidationStopper, build_validation_set
 
-        # Probe verses come from the VALIDATION split (restricted to the
-        # target languages), never from the test pairs: stopping and
+        # Validation verses come from the VALIDATION split (restricted to
+        # the target languages), never from the test pairs: stopping and
         # checkpoint selection must not see the verses reported as scores.
-        # This deviates from the prior two series, which drew this set from test verses
-        # (experiments/code-review-findings.md, finding 1.1).
-        available = valid_pairs[
-            valid_pairs["translation"].isin(data.holdout_translations)
-        ]["translation"].value_counts()
-        short = {
-            t: int(available.get(t, 0))
-            for t in data.holdout_translations
-            if available.get(t, 0) < cfg.validation.verses_per_language
-        }
-        if short:
-            raise ValueError(
-                f"The validation set needs {cfg.validation.verses_per_language} validation "
-                f"verses per target language but only found {short}; raise "
-                f"valid_size in the holdouts YAML or lower "
-                f"validation.verses_per_language"
-            )
+        # Sampled from the PRE-length-filter frame so every run of a series
+        # validates the identical (vref, translation) pairs regardless of
+        # its tokenizer (the length filter is tokenizer-dependent).
         held_out = build_validation_set(
-            valid_pairs, data.language_of,
+            data.valid_pairs, data.language_of,
             cfg.validation.verses_per_language, cfg.validation.seed,
             translations=data.holdout_translations,
+            min_required=cfg.validation.verses_per_language,
         )
         validation_sets = {"": held_out}
         msg = (f"  validation set: {len(held_out)} verses / "
@@ -374,20 +403,22 @@ def run(args) -> None:
     )
 
     trainer.train()
-    metrics = trainer.evaluate()
-    print(f"  final eval: {metrics}")
 
-    # For validation-driven runs the checkpoint used downstream is the best-validation
-    # one saved by ValidationStopper, not the final-step weights; load it back so
-    # save_model writes it as the run's model (spec-vref.md, "Checkpointing").
+    # For validation-driven runs the checkpoint shipped downstream is the
+    # best-validation one saved by ValidationStopper, not the final-step
+    # weights; load it back BEFORE the final evaluation so the recorded
+    # eval_loss belongs to the weights save_model actually writes.
     if stopper is not None and stopper.best is not None:
-        from .validation import BEST_DIR, plot_curves
+        from .validation import VALIDATION_PNG, plot_curves
 
         best_dir = output / BEST_DIR
         trainer.model = type(model).from_pretrained(str(best_dir)).to(model.device)
         print(f"  using best-validation checkpoint: chrF3_macro={stopper.best[1]} "
               f"@ step {stopper.best[0]}")
-        plot_curves(stopper.csv_path, output / "validation.png")
+        plot_curves(stopper.csv_path, output / VALIDATION_PNG)
+
+    metrics = trainer.evaluate()
+    print(f"  final eval (shipped weights): {metrics}")
 
     trainer.save_model(str(output))
     shutil.copy(cfg.path, output / "config.yaml")
@@ -441,7 +472,7 @@ def main() -> None:
                    help="enqueue this run on a ClearML queue and exit (e.g. jobs_backlog)")
     p.add_argument("--docker-image", default=None,
                    help="docker image for the remote agent (the queue's default "
-                        "image breaks agent bootstrap; see spec.md Infrastructure)")
+                        "image breaks agent bootstrap)")
     p.add_argument("--generate-after", action="store_true",
                    help="after training, generate + score held-out books and upload them")
     p.add_argument("--gen-batch-size", type=int, default=32)

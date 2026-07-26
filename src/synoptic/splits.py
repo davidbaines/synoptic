@@ -2,7 +2,7 @@
 
 Holdouts are whole books per translation, plus (new in this series) optional
 verse-level holdout sets — fixed vref lists like the committed Genesis-250
-test set (spec.md, "Test sets"). Held-out books and verses form the test set,
+test set. Held-out books and verses form the test set,
 a small random pair sample forms the validation set, and everything else
 trains.
 """

@@ -35,11 +35,9 @@ model:                    # deliberately tiny; NOT transformer-big
   label_smoothing: 0.1
 
 training:
-  optimizer: adamw
   lr: 5.0e-4
   warmup_steps: 200
   lr_scheduler: inverse_sqrt
-  max_tokens_per_batch: 8000
   per_device_batch_size: 64
   gradient_accumulation: 1
   max_grad_norm: 1.0
@@ -54,4 +52,3 @@ inference:
   length_penalty: 1.0
   max_length: 128
 
-oversample_holdouts: 1

@@ -1,4 +1,4 @@
-"""Verse-pair preprocessing (spec.md, "Preprocessing").
+"""Verse-pair preprocessing.
 
 Native scripts, case preserved, Unicode NFC only. One training example is one
 verse: the source text with the target-language tag prepended, paired with the
@@ -29,7 +29,7 @@ def target_tag(language_code: str) -> str:
 
 
 def source_tag(language_code: str) -> str:
-    """Source-language tag for many-to-many training (spec.md phase 4).
+    """Source-language tag for many-to-many training.
 
     One-to-many uses only the target tag; many-to-many prepends the source tag
     as well, so the model knows both which language it is reading and which it
@@ -106,10 +106,9 @@ def length_filter(
     """Drop pairs that are too long or too unbalanced after tokenisation.
 
     Returns the kept pairs and counts of what was dropped, so pipelines can
-    log truncation instead of silently shrinking the data (spec.md,
-    "no silent caps"). ``max_ratio`` 0 (or None) disables the ratio filter —
+    log truncation instead of silently shrinking the data ("no silent caps"). ``max_ratio`` 0 (or None) disables the ratio filter —
     a vref source is always a few tokens, so every pair would fail it
-    (spec-vref.md, "Data"). ``max_src_len`` caps the source side separately
+   . ``max_src_len`` caps the source side separately
     (multi-source concatenations are much longer than any target).
     """
     src_len = pairs[SRC_COLUMN].map(lambda s: len(encode(s)))
