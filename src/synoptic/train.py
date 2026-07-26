@@ -173,18 +173,18 @@ def _upload_artifacts(output: Path) -> None:
 
     from .chunks import MANIFEST_ARTIFACT, split_file
 
-    def upload(name: str, obj) -> bool:
-        for attempt in range(1, 5):
+    def upload(name: str, obj, attempts: int = 3) -> bool:
+        for attempt in range(1, attempts + 1):
             try:
                 # upload_artifact can also report failure by returning False
                 # (missing file, old server API) without raising.
                 if task.upload_artifact(name, artifact_object=obj, wait_on_upload=True):
                     return True
-                print(f"  WARNING: upload of {name} attempt {attempt}/4 "
+                print(f"  WARNING: upload of {name} attempt {attempt}/{attempts} "
                       "was rejected (upload_artifact returned False)")
             except Exception as e:  # noqa: BLE001 - any transport error
-                print(f"  WARNING: upload of {name} attempt {attempt}/4 failed: {e}")
-            if attempt < 4:
+                print(f"  WARNING: upload of {name} attempt {attempt}/{attempts} failed: {e}")
+            if attempt < attempts:
                 time.sleep(30 * attempt)
         return False
 
@@ -205,11 +205,18 @@ def _upload_artifacts(output: Path) -> None:
             print("  WARNING: manifest upload abandoned; weights live only on "
                   "the worker. Scores remain in the console log.")
             return
-        for part in parts:
-            if not upload(part.name, str(part)):
-                print(f"  WARNING: {part.name} abandoned; weights incomplete. "
-                      "Scores remain in the console log.")
-                return
+        # First pass over every part, then a second pass over the failures:
+        # the server's bad windows are transient, so a part that failed its
+        # retries often succeeds minutes later after the rest have gone up.
+        failed = [part for part in parts if not upload(part.name, str(part))]
+        if failed:
+            print(f"  retrying {len(failed)} failed part(s) after a pause ...")
+            time.sleep(120)
+            failed = [part for part in failed if not upload(part.name, str(part))]
+        if failed:
+            print(f"  WARNING: {[p.name for p in failed]} abandoned after two "
+                  "passes; weights incomplete. Scores remain in the console log.")
+            return
         print(f"  uploaded run archive as {len(parts)} parts + manifest "
               f"to ClearML task {task.id}")
 

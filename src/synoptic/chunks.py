@@ -1,10 +1,10 @@
 """Split/reassemble large files for artifact transport.
 
-The ClearML file server kills uploads somewhere between 200 MB and 400 MB
-(SSL EOF; probed 2026-07-25 — 200 MB passes, 400 MB fails, on every worker
-tried). Run archives are ~1.5 GB, so ``train`` uploads them as numbered
-parts under this size plus a checksum manifest, and ``fetch_weights``
-reassembles and verifies them.
+The ClearML file server kills large uploads unreliably (SSL EOF), with a
+failure threshold that drifts between roughly 50 MB and 400 MB from day to
+day. Run archives are ~1.5 GB, so ``train`` uploads them as numbered parts
+small enough to stay reliable, plus a checksum manifest, and
+``fetch_weights`` reassembles and verifies them.
 """
 
 from __future__ import annotations
@@ -12,7 +12,10 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-PART_SIZE = 150 * 1024 * 1024  # comfortably under the ~200-400 MB failure band
+# The file server's tolerance drifts: a 200 MB probe passed on 2026-07-25,
+# then 150 MB parts failed 4/4 retries on 2026-07-26, while every upload at
+# or below ~50 MB has succeeded. Stay well under the observed failure zone.
+PART_SIZE = 48 * 1024 * 1024
 MANIFEST_ARTIFACT = "run_manifest"
 PART_PREFIX = "run.part"
 
