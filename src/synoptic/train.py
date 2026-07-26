@@ -98,6 +98,22 @@ def _maybe_clearml(
             "synoptic",
             f"@ git+https://github.com/davidbaines/synoptic@v{__version__}",
         )
+        # The capture analyzes the EXPERIMENT repo's imports only; the train
+        # stack is imported lazily inside this package, so it never appears
+        # there. Force it with the locally installed versions (the local venv
+        # tracks the workers' Python for exactly this reason). torch's
+        # +cu124 local-version pin goes through clearml-agent's PyTorch
+        # index resolution, as the v1 captures did.
+        from importlib import metadata
+
+        for pkg in ("torch", "transformers", "accelerate", "matplotlib"):
+            try:
+                Task.add_requirements(pkg, metadata.version(pkg))
+            except metadata.PackageNotFoundError:
+                raise SystemExit(
+                    f"{pkg} is not installed locally; remote runs capture "
+                    "requirement versions from this environment"
+                )
     # The ClearML project is the experiment repo's directory name.
     task = Task.init(project_name=cfg.root.name, task_name=cfg.name)
     if remote_queue:
