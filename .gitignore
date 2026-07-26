@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+dist/
+.pytest_cache/
+*.egg-info/
+
+# Data and run artefacts (never committed)
+data/
+checkpoints/
+runs/
+wandb/
+clearml.conf
+*.ckpt
+
+# Local training/run logs
+logs/
+
+# Local-only Claude settings
+.claude/settings.local.json
+
+# Personal conversation transcripts and exports, not part of the project
+*conversation_with_claude*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.venv-eflomal/

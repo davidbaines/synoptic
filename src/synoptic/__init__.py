@@ -12,10 +12,7 @@ try:
 except metadata.PackageNotFoundError:  # running from a raw checkout
     __version__ = "0.0.0"
 
-# Where remote agents install this package from. The requirements capture at
-# enqueue time records synoptic as a bare name==version pair, which pip would
-# resolve from PyPI (an unrelated project); train._maybe_clearml pins this
-# instead.
-GIT_REQUIREMENT = (
-    f"synoptic @ git+https://github.com/davidbaines/synoptic@v{__version__}"
-)
+# Remote agents install this package by git tag: train._maybe_clearml forces
+# "synoptic @ git+https://github.com/davidbaines/synoptic@v<__version__>"
+# into the task requirements (keyed by package name so it replaces the
+# captured PyPI-style pin).
