@@ -44,13 +44,19 @@ def fetch(task, out_dir: Path) -> Path:
     manifest = json.loads(_local_copy(artifacts, MANIFEST_ARTIFACT).read_text())
     print(f"{task.name}: {manifest['parts']} parts, "
           f"{manifest['size'] / 1e6:.0f} MB archive")
-    missing = [n for n in manifest["part_names"] if n not in artifacts]
+    # Manifests written before part names were recorded fall back to the
+    # naming-scheme scan (numeric order; checksums still verify the result).
+    part_names = manifest.get("part_names") or sorted(
+        (n for n in artifacts if n.startswith("run.part")),
+        key=lambda n: int(n.removeprefix("run.part")),
+    )
+    missing = [n for n in part_names if n not in artifacts]
     if missing:
         raise SystemExit(
             f"task {task.id} is missing part artifact(s) {missing} — the "
             "upload was incomplete (see its console log)"
         )
-    parts = [_local_copy(artifacts, n) for n in manifest["part_names"]]
+    parts = [_local_copy(artifacts, n) for n in part_names]
 
     out_dir.mkdir(parents=True, exist_ok=True)
     archive = join_files(parts, manifest, out_dir / manifest["file_name"])

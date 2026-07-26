@@ -89,10 +89,17 @@ def select_translations(
     if config.one_per_language:
         taken_langs = set(forced["languageCode"])
         pool = pool[~pool["languageCode"].isin(taken_langs)]
+        # Stable sort with a translationId tiebreak, then whole-row dedupe:
+        # groupby(...).first() would take the first NON-NULL value per column
+        # and could stitch two translations into one chimera row, and a
+        # totalVerses tie would otherwise be broken by sort-implementation
+        # detail, changing committed selections across pandas versions.
         pool = (
-            pool.sort_values("totalVerses", ascending=False)
-            .groupby("languageCode", as_index=False)
-            .first()
+            pool.sort_values(
+                ["totalVerses", "translationId"],
+                ascending=[False, True], kind="mergesort",
+            )
+            .drop_duplicates("languageCode", keep="first")
         )
 
     if config.target_size is None:

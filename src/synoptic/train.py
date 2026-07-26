@@ -72,11 +72,21 @@ def _maybe_clearml(
                 f"(entry point was {entry})"
             )
         # The requirements capture records synoptic as a bare name==version,
-        # which pip would resolve from PyPI (a different project). Pin the
-        # git source explicitly for the agent.
-        from . import GIT_REQUIREMENT
+        # which pip would resolve from PyPI (a different project). Force the
+        # git source instead; keying by package name makes ClearML REPLACE
+        # the captured line rather than adding a second, conflicting one.
+        from . import __version__
 
-        Task.add_requirements(GIT_REQUIREMENT)
+        if __version__ == "0.0.0":
+            raise SystemExit(
+                "synoptic is running from a raw checkout (version 0.0.0); "
+                "remote agents install it by git tag, so enqueue from an "
+                "environment with a released synoptic installed"
+            )
+        Task.add_requirements(
+            "synoptic",
+            f"@ git+https://github.com/davidbaines/synoptic@v{__version__}",
+        )
     # The ClearML project is the experiment repo's directory name.
     task = Task.init(project_name=cfg.root.name, task_name=cfg.name)
     if remote_queue:
@@ -135,7 +145,8 @@ def _upload_artifacts(output: Path) -> None:
                       "was rejected (upload_artifact returned False)")
             except Exception as e:  # noqa: BLE001 - any transport error
                 print(f"  WARNING: upload of {name} attempt {attempt}/4 failed: {e}")
-            time.sleep(30 * attempt)
+            if attempt < 4:
+                time.sleep(30 * attempt)
         return False
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -257,19 +268,23 @@ def run(args) -> None:
     cfg = ExperimentConfig.load(args.config)
     output = Path(args.output_dir) if args.output_dir else cfg.root / "checkpoints" / cfg.name
     output.mkdir(parents=True, exist_ok=True)
+
+    _maybe_clearml(cfg, args.clearml, args.remote_queue, args.docker_image)
+    # (With --remote-queue the process has already enqueued and exited by
+    # here unless it IS the remote worker, whose clone starts clean.)
+
     from .validation import BEST_DIR, VALIDATION_CSV
 
     stale = [n for n in (VALIDATION_CSV, BEST_DIR) if (output / n).exists()]
-    if stale:
+    if stale and not args.overfit:
         # A leftover validation curve or best/ checkpoint would be read as
         # this run's state: the stopper would inherit the old best score and
-        # save_model could ship the previous run's weights.
+        # save_model could ship the previous run's weights. (--overfit never
+        # reads or writes that state, so it may rerun in place.)
         raise SystemExit(
             f"{output} contains a previous run's state ({', '.join(stale)}); "
             "delete the directory or pass a fresh --output-dir"
         )
-
-    _maybe_clearml(cfg, args.clearml, args.remote_queue, args.docker_image)
 
     print(f"Preparing data for '{cfg.name}' ...")
     data = prepare(cfg)
