@@ -45,7 +45,12 @@ from .splits import assert_no_leakage, manifest_checksum
 from .tokenizer import load_tokenizer, train_tokenizer
 
 
-DEFAULT_DOCKER_IMAGE = "pytorch/pytorch:2.4.1-cuda12.4-cudnn9-runtime"
+# Matches the pinned torch (2.6.0+cu124) so the preinstalled torch and its
+# native CUDA libraries satisfy the requirement as-is: the agent's venv
+# gets torch from the image instead of a wheel whose nvidia-* library
+# packages land where the venv's loader cannot see them (v2 smoke attempts
+# 5-6 died on libcudnn.so.9 exactly that way).
+DEFAULT_DOCKER_IMAGE = "pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime"
 
 
 def _maybe_clearml(
