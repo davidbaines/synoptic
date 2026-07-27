@@ -1,14 +1,15 @@
-"""Download a remote run's weights.
+"""Fetch a remote run's weights from the shared MinIO store.
 
     python -m synoptic.fetch_weights --run ms8_arabic_drafting
     python -m synoptic.fetch_weights --task-id <id> --out weights/<run>
 
-Runs upload their directory to the shared MinIO store
+Runs upload their directory to the store
 (``nlp-research/MT/experiments/synoptic/<repo>/<run>/``, browsable at
-``~/M/...``); this downloads it with the MINIO_* credentials. Tasks from the
-brief chunked-artifact era fall back to manifest+parts reassembly via
-``--task-id``. The resulting directory is what ``synoptic.publish`` expects
-as a local run.
+``~/M/...``) with a manifest written last; this downloads it and verifies
+every file against that manifest (``store.download_run``), so an incomplete
+upload cannot masquerade as a good run. Tasks from the brief
+chunked-artifact era fall back to manifest+parts reassembly via
+``--task-id``. The resulting directory is what ``synoptic.publish`` expects.
 """
 
 from __future__ import annotations
@@ -18,44 +19,9 @@ import json
 import zipfile
 from pathlib import Path
 
-from .chunks import MANIFEST_ARTIFACT, join_files
+from . import store
+from .chunks import MANIFEST_ARTIFACT, PART_PREFIX, join_files
 from .data import repo_root
-
-BUCKET = "nlp-research"
-# Cert is hostname-only (no IP SAN); connect by the canonical hostname.
-MINIO_ENDPOINT = "https://truenas.psonet.languagetechnology.org:9000"
-
-
-def fetch_s3(run: str, out_dir: Path, repo: str | None = None) -> Path:
-    """Download a run directory from the MinIO store."""
-    import os
-
-    import boto3
-
-    access = os.environ.get("MINIO_ACCESS_KEY")
-    secret = os.environ.get("MINIO_SECRET_KEY")
-    if not (access and secret):
-        raise SystemExit("MINIO_* credentials are not set")
-    s3 = boto3.client("s3", endpoint_url=MINIO_ENDPOINT,
-                      aws_access_key_id=access, aws_secret_access_key=secret)
-    repo = repo or repo_root().name
-    prefix = f"MT/experiments/synoptic/{repo}/{run}/"
-    paginator = s3.get_paginator("list_objects_v2")
-    keys = [o["Key"] for page in paginator.paginate(Bucket=BUCKET, Prefix=prefix)
-            for o in page.get("Contents", [])]
-    if not keys:
-        raise SystemExit(f"nothing stored under {BUCKET}/{prefix}")
-    print(f"{run}: {len(keys)} files from {BUCKET}/{prefix}")
-    for key in keys:
-        target = out_dir / key.removeprefix(prefix)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        s3.download_file(BUCKET, key, str(target))
-    config = out_dir / "config.json"
-    if config.exists():
-        print(f"OK: run directory at {out_dir} (model config present)")
-    else:
-        print(f"WARNING: downloaded to {out_dir} but no config.json found")
-    return out_dir
 
 
 def _local_copy(artifacts, name: str) -> Path:
@@ -68,7 +34,8 @@ def _local_copy(artifacts, name: str) -> Path:
     return Path(local)
 
 
-def fetch(task, out_dir: Path) -> Path:
+def fetch_chunked(task, out_dir: Path) -> Path:
+    """Legacy path: reassemble a chunked-artifact upload (pre-store runs)."""
     artifacts = task.artifacts
     if MANIFEST_ARTIFACT not in artifacts:
         raise SystemExit(
@@ -79,11 +46,9 @@ def fetch(task, out_dir: Path) -> Path:
     manifest = json.loads(_local_copy(artifacts, MANIFEST_ARTIFACT).read_text())
     print(f"{task.name}: {manifest['parts']} parts, "
           f"{manifest['size'] / 1e6:.0f} MB archive")
-    # Manifests written before part names were recorded fall back to the
-    # naming-scheme scan (numeric order; checksums still verify the result).
     part_names = manifest.get("part_names") or sorted(
-        (n for n in artifacts if n.startswith("run.part")),
-        key=lambda n: int(n.removeprefix("run.part")),
+        (n for n in artifacts if n.startswith(PART_PREFIX)),
+        key=lambda n: int(n.removeprefix(PART_PREFIX)),
     )
     missing = [n for n in part_names if n not in artifacts]
     if missing:
@@ -92,20 +57,14 @@ def fetch(task, out_dir: Path) -> Path:
             "upload was incomplete (see its console log)"
         )
     parts = [_local_copy(artifacts, n) for n in part_names]
-
     out_dir.mkdir(parents=True, exist_ok=True)
     archive = join_files(parts, manifest, out_dir / manifest["file_name"])
     for part in parts:
-        part.unlink()  # cached downloads: ~150 MB each, dead after the join
+        part.unlink()  # cached downloads, dead after the join
     with zipfile.ZipFile(archive) as zf:
         zf.extractall(out_dir)
     archive.unlink()
-
-    config = out_dir / "config.json"
-    if config.exists():
-        print(f"OK: run directory at {out_dir} (model config present)")
-    else:
-        print(f"WARNING: extracted to {out_dir} but no config.json found")
+    print(f"OK: run directory at {out_dir}")
     return out_dir
 
 
@@ -129,19 +88,23 @@ def main() -> None:
     g.add_argument("--task-id", help="chunked-artifact era task fallback")
     g.add_argument("--name", help="task name lookup for the fallback path")
     ap.add_argument("--repo", default=None,
-                    help="experiment repo name on the store (default: this repo)")
+                    help="experiment repo name on the store "
+                         "(default: this repo's directory name)")
     ap.add_argument("--out", default=None,
                     help="directory for the run contents "
                          "(default checkpoints/<run>)")
     args = ap.parse_args()
     if args.run:
+        # store.normalize_repo makes a local checkout and the worker's
+        # <repo>.git clone address the same prefix without a manual --repo.
+        repo = args.repo or repo_root().name
         out = Path(args.out) if args.out else repo_root() / "checkpoints" / args.run
-        fetch_s3(args.run, out, repo=args.repo)
+        store.download_run(repo, args.run, out)
         return
     task = resolve_task(args.task_id, args.name)
     out = (Path(args.out) if args.out
            else repo_root() / "checkpoints" / task.name)
-    fetch(task, out)
+    fetch_chunked(task, out)
 
 
 if __name__ == "__main__":

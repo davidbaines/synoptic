@@ -51,11 +51,6 @@ from .tokenizer import load_tokenizer, train_tokenizer
 # packages land where the venv's loader cannot see them (v2 smoke attempts
 # 5-6 died on libcudnn.so.9 exactly that way).
 DEFAULT_DOCKER_IMAGE = "pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime"
-BUCKET = "nlp-research"
-# The cert is valid ONLY for this hostname (no IP SAN); the ClearML agents
-# inject the store as a bare IP, which fails TLS hostname verification, so we
-# always connect by the canonical hostname (it resolves to that same LAN IP).
-MINIO_ENDPOINT = "https://truenas.psonet.languagetechnology.org:9000"
 
 
 def _maybe_clearml(
@@ -150,13 +145,18 @@ def _maybe_clearml(
         import socket
         from urllib.parse import urlparse
 
-        host = urlparse(MINIO_ENDPOINT).hostname
+        from . import store
+
+        host = urlparse(store.MINIO_ENDPOINT).hostname
         try:
             ip = socket.gethostbyname(host)
-            docker_args.append(f"--add-host {host}:{ip}")
-        except OSError:
-            print(f"  WARNING: could not resolve {host} locally; the worker "
-                  "may be unable to reach the weights store")
+        except OSError as e:
+            raise SystemExit(
+                f"cannot resolve the weights store {host} at enqueue "
+                f"({e}); the worker would have no route to it and lose its "
+                "weights. Enqueue from a host that resolves the store."
+            )
+        docker_args.append(f"--add-host {host}:{ip}")
         task.set_base_docker(
             docker_image=docker_image or DEFAULT_DOCKER_IMAGE,
             docker_arguments=" ".join(docker_args),
@@ -166,73 +166,25 @@ def _maybe_clearml(
     return task
 
 
-def _upload_artifacts(output: Path, cfg: ExperimentConfig) -> None:
-    """Upload the run directory to the shared MinIO store (the M: drive).
-
-    The store is the same bucket silnlp's rclone results use — the MinIO on
-    truenas.psonet.languagetechnology.org, mounted locally at ~/M — so run
-    directories land browsable at M/MT/experiments/synoptic/<repo>/<run>/.
-    Credentials come from the MINIO_* environment variables, present on the
-    workers (injected into the task containers) and on the local box alike.
-    The ClearML file server is NOT used for weights: it drops bulk uploads
-    unreliably (SSL EOF; thresholds drifted between 50 and 400 MB across
-    2026-07-25/26).
-
-    Intermediate trainer checkpoints (optimizer states) and best/ (duplicate
-    of the shipped weights) are skipped.
-    """
+def _on_agent() -> bool:
+    """True when running inside a ClearML agent (an ephemeral worker)."""
     import os
 
-    if not os.environ.get("CLEARML_TASK_ID"):
-        # Local runs already have their weights on disk; only agent runs
-        # (ephemeral containers) need to ship them to the store.
-        return
-    access = os.environ.get("MINIO_ACCESS_KEY")
-    secret = os.environ.get("MINIO_SECRET_KEY")
-    if not (access and secret):
-        print("  WARNING: MINIO_* credentials not set; weights stay on this "
-              "machine only (scores remain in the console log)")
-        return
-    try:
-        import boto3
-    except ImportError:
-        print("  WARNING: boto3 not installed; weights stay on this machine "
-              "only (scores remain in the console log)")
-        return
+    return bool(os.environ.get("CLEARML_TASK_ID"))
 
-    s3 = boto3.client(
-        "s3", endpoint_url=MINIO_ENDPOINT,
-        aws_access_key_id=access, aws_secret_access_key=secret,
-    )
-    prefix = f"MT/experiments/synoptic/{cfg.root.name}/{output.name}"
-    skip_dirs = ("checkpoint-", "best")
-    files = [
-        f for f in sorted(output.rglob("*"))
-        if f.is_file() and not any(
-            part.startswith(skip)
-            for part in f.relative_to(output).parts for skip in skip_dirs
-        )
-    ]
-    total = sum(f.stat().st_size for f in files)
-    print(f"  uploading {len(files)} files ({total / 1e6:.0f} MB) to "
-          f"{BUCKET}/{prefix} ...")
-    import time
 
-    for f in files:
-        key = f"{prefix}/{f.relative_to(output)}"
-        for attempt in range(1, 4):
-            try:
-                s3.upload_file(str(f), BUCKET, key)
-                break
-            except Exception as e:  # noqa: BLE001 - any transport error
-                print(f"  WARNING: upload of {key} attempt {attempt}/3 failed: {e}")
-                if attempt == 3:
-                    print("  WARNING: giving up on this file; run directory "
-                          "incomplete on the store")
-                    return
-                time.sleep(20 * attempt)
-    print(f"  run directory stored: {BUCKET}/{prefix} "
-          f"(browsable at ~/M/{prefix})")
+def _upload_artifacts(output: Path, cfg: ExperimentConfig) -> None:
+    """Store the run directory on the shared MinIO store, or fail loudly.
+
+    Only agent runs upload — a local run already has its weights on disk.
+    The store transport and its completeness guarantee live in ``store`` and
+    raise on an incomplete upload, so a "completed" task always has a full,
+    manifest-verified model on the store (store.upload_run)."""
+    if not _on_agent():
+        return
+    from . import store
+
+    store.upload_run(output, repo=cfg.root.name, run=cfg.name)
 
 
 def _leading_tags(src: str) -> list[str]:
@@ -332,6 +284,13 @@ def run(args) -> None:
     _maybe_clearml(cfg, args.clearml, args.remote_queue, args.docker_image)
     # (With --remote-queue the process has already enqueued and exited by
     # here unless it IS the remote worker, whose clone starts clean.)
+
+    if _on_agent() and not args.overfit:
+        # Fail in seconds if the store is unreachable or credentials are
+        # missing, rather than after GPU-hours followed by a lost model.
+        from . import store
+
+        store.preflight(repo=cfg.root.name, run=cfg.name)
 
     from .validation import BEST_DIR, VALIDATION_CSV
 
