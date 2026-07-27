@@ -38,11 +38,22 @@ from .data import RANGE_MARKER, VREF_COLUMN, load_metadata, load_verses
 
 NLLB_DISTILLED_1_3B = "facebook/nllb-200-distilled-1.3B"
 SILNLP_SEED = 111  # silnlp's default split seed
+# Our extracts live in the SHARED silnlp scripture dir (the only one the remote
+# workers read — a local env override would not reach them), so they carry a
+# distinct project suffix: it avoids overwriting silnlp's own extracts (e.g.
+# an existing hin-hin2017.txt from a different eBible snapshot) and guarantees
+# the reference text is exactly ours.
+SOTA_PROJECT_SUFFIX = "_synsota"
 
 
 def extract_stem(iso: str, project: str) -> str:
-    """silnlp corpus file stem ``<iso>-<project>`` (project = our translationId)."""
+    """silnlp corpus file stem ``<iso>-<project>``."""
     return f"{iso}-{project}"
+
+
+def sota_stem(iso: str, translation_id: str) -> str:
+    """The extract stem for one of our exported corpus files (suffixed)."""
+    return extract_stem(iso, f"{translation_id}{SOTA_PROJECT_SUFFIX}")
 
 
 def flores_tag(iso: str, script: str) -> str:
@@ -90,28 +101,61 @@ def export_scripture(translation_ids: list[str], scripture_dir: Path) -> list[Pa
     scripture_dir.mkdir(parents=True, exist_ok=True)
     meta = load_metadata().set_index("translationId")
     verses = load_verses(sorted(set(translation_ids)))
+    # silnlp maps each vref to a line number in its master vref.txt, so the
+    # extracts must be line-for-line aligned to that ordering. The corpus index
+    # is that ordering; assert it is intact rather than trust it silently.
+    n = len(verses.index)
+    if n == 0 or verses.index[0] != "GEN 1:1":
+        raise SystemExit(
+            f"corpus vref index looks wrong (len={n}, first={verses.index[:1].tolist()}); "
+            "extracts would misalign to silnlp's vref.txt"
+        )
     written = []
     for tid in sorted(set(translation_ids)):
         iso = meta.at[tid, "languageCode"]
-        col = verses[tid]
-        # Corpus already gives "" for missing; keep <range> as silnlp does.
-        lines = ["" if v is None else str(v) for v in col.tolist()]
-        path = scripture_dir / f"{extract_stem(iso, tid)}.txt"
+        # fillna guards against a NaN cell reaching the extract as "nan"
+        # (load_verses already fills "", but this keeps export self-contained).
+        col = verses[tid].fillna("")
+        lines = [str(v) for v in col.tolist()]  # keep "" (missing) and <range>
+        path = scripture_dir / f"{sota_stem(iso, tid)}.txt"
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         written.append(path)
     return written
+
+
+def exp_relref(rel_root: str, name: str) -> str:
+    """Experiment path relative to MT/experiments (what silnlp addresses)."""
+    return f"{rel_root}/{name}"
+
+
+def donor_relref(rel_root: str, name: str) -> str:
+    """Path of the run's test-set donor dir (a sibling, never preprocessed).
+
+    silnlp's preprocess deletes ``test.*.txt`` in the experiment dir before it
+    reads the pin, so the exact test verses must live in a separate directory
+    referenced by ``use_test_set_from`` (silnlp/nmt/config.py). This one holds
+    only ``test.<src_iso>.<trg_iso>.vref.txt``.
+    """
+    return f"{rel_root}/{name}__testset"
+
+
+def donor_vref_name(spec: "SotaSpec") -> str:
+    """Per-pair donor filename; silnlp maps the pin by (src_iso, trg_iso)."""
+    return f"test.{spec.src_iso}.{spec.trg_iso}.vref.txt"
 
 
 def build_config(spec: SotaSpec, use_test_set_from: str,
                  model: str = NLLB_DISTILLED_1_3B) -> dict:
     """The silnlp ``config.yml`` contents for one baseline (pure; unit-tested).
 
-    ``use_test_set_from`` is the experiment path (relative to MT/experiments)
-    whose ``test.vref.txt`` pins the exact test set — normally this run itself.
-    Training is everything else: with no ``corpus_books`` the pair spans the
-    whole Bible and the test verses (and only those) are held out, so the train
-    set is exactly the complement — which is how we encode each condition
-    purely through ``test_vrefs``.
+    ``use_test_set_from`` is the donor experiment path (relative to
+    MT/experiments) whose ``test.<src>.<trg>.vref.txt`` pins the exact test
+    set. With no ``corpus_books``/``test_books`` the pair spans the whole
+    Bible and silnlp holds out exactly the pinned verses (removing them from
+    train, silnlp/nmt/config.py), so the train set is exactly the complement —
+    which is how each condition is encoded purely through ``test_vrefs``.
+    ``type`` includes ``val`` so silnlp does its default 250-verse
+    validation split and best-checkpoint selection (the routine fine-tune).
     """
     lang_codes = {
         spec.src_iso: flores_tag(spec.src_iso, spec.src_script),
@@ -123,9 +167,9 @@ def build_config(spec: SotaSpec, use_test_set_from: str,
             "seed": SILNLP_SEED,
             "lang_codes": lang_codes,
             "corpus_pairs": [{
-                "src": extract_stem(spec.src_iso, spec.src_project),
-                "trg": extract_stem(spec.trg_iso, spec.trg_project),
-                "type": "train,test",
+                "src": sota_stem(spec.src_iso, spec.src_project),
+                "trg": sota_stem(spec.trg_iso, spec.trg_project),
+                "type": "train,test,val",
                 "mapping": "mixed_src",
                 "use_test_set_from": use_test_set_from,
             }],
@@ -135,40 +179,44 @@ def build_config(spec: SotaSpec, use_test_set_from: str,
 
 def write_experiment(spec: SotaSpec, collect_dir: Path,
                      rel_root: str, model: str = NLLB_DISTILLED_1_3B) -> Path:
-    """Write ``config.yml`` + ``test.vref.txt`` for one baseline.
+    """Write the baseline's donor test-set dir and its ``config.yml``.
 
-    ``collect_dir`` is the on-disk experiment folder
-    (``.../MT/experiments/<rel_root>/<name>``); ``rel_root`` is that folder's
-    path relative to ``MT/experiments`` so the config can self-reference its
-    own test set via ``use_test_set_from``.
+    Creates two folders under ``collect_dir``: ``<name>__testset/`` holding the
+    exact test verses (never preprocessed), and ``<name>/`` with the config
+    whose ``use_test_set_from`` points at the donor. ``rel_root`` is
+    ``collect_dir`` relative to MT/experiments, so the reference resolves on
+    the worker.
     """
+    donor_dir = collect_dir / f"{spec.name}__testset"
+    donor_dir.mkdir(parents=True, exist_ok=True)
+    (donor_dir / donor_vref_name(spec)).write_text(
+        "\n".join(spec.test_vrefs) + "\n", encoding="utf-8",
+    )
     exp_dir = collect_dir / spec.name
     exp_dir.mkdir(parents=True, exist_ok=True)
-    self_ref = f"{rel_root}/{spec.name}"
     (exp_dir / "config.yml").write_text(
-        yaml.safe_dump(build_config(spec, self_ref, model), sort_keys=False),
+        yaml.safe_dump(
+            build_config(spec, donor_relref(rel_root, spec.name), model),
+            sort_keys=False,
+        ),
         encoding="utf-8",
-    )
-    (exp_dir / "test.vref.txt").write_text(
-        "\n".join(spec.test_vrefs) + "\n", encoding="utf-8",
     )
     return exp_dir
 
 
-def run(exp_name: str, rel_root: str, queue: str | None = None,
-        max_steps: int | None = None) -> list[str]:
-    """Build the silnlp command to preprocess/train/test one baseline per-book.
+def run(exp_name: str, rel_root: str, queue: str | None = None) -> list[str]:
+    """Build the silnlp argv to preprocess/train/test one baseline, per book.
 
-    Returns the argv (the caller runs it, gated on free workers). ``max_steps``
-    overrides silnlp's default only for smoke checks (passed via env the config
-    would normally hold; here we keep it explicit for the caller to inject).
+    The experiment path comes first (before ``--scorers``, whose nargs='*'
+    would otherwise swallow it) and ``--scorers chrf3`` comes last. Returns
+    the argv; the caller runs it, gated on free workers.
     """
     argv = [
         "python", "-m", "silnlp.nmt.experiment",
-        "--preprocess", "--train", "--test",
-        "--by-book", "--scorers", "chrf3",
-        f"{rel_root}/{exp_name}",
+        exp_relref(rel_root, exp_name),
+        "--preprocess", "--train", "--test", "--score-by-book",
     ]
     if queue:
-        argv[3:3] = ["--clearml-queue", queue]
+        argv += ["--clearml-queue", queue]
+    argv += ["--scorers", "chrf3"]
     return argv
