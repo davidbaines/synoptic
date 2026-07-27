@@ -57,6 +57,7 @@ def test_write_experiment_puts_testset_in_separate_donor(tmp_path):
 def test_run_argv_flags_and_ordering():
     argv = sota.run("exp1", "synoptic-sota/x", queue="jobs_backlog")
     assert "--score-by-book" in argv and "--by-book" not in argv
+    assert "--save-confidences" in argv  # required by --score-by-book
     # experiment path precedes --scorers (nargs=* would otherwise eat it)
     assert argv.index("synoptic-sota/x/exp1") < argv.index("--scorers")
     assert argv[-2:] == ["--scorers", "chrf3"]

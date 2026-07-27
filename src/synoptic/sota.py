@@ -245,10 +245,14 @@ def run(exp_name: str, rel_root: str, queue: str | None = None,
     queued run; these SOTA baselines are tagged ``research``. Returns the
     argv; the caller runs it, gated on free workers.
     """
+    # --save-confidences is required by --score-by-book: silnlp's per-book
+    # scorer reads a per-checkpoint confidences.tsv that is only written when
+    # confidences are saved (silnlp/nmt/test.py process_individual_books).
     argv = [
         "python", "-m", "silnlp.nmt.experiment",
         exp_relref(rel_root, exp_name),
-        "--preprocess", "--train", "--test", "--score-by-book",
+        "--preprocess", "--train", "--test",
+        "--save-confidences", "--score-by-book",
     ]
     if queue:
         argv += ["--clearml-queue", queue, "--clearml-tag", clearml_tag]

@@ -49,7 +49,7 @@ duplicate.
 ## History
 
 Extracted 2026-07-26 from the (fixed) vendored copy in
-`bible-mt-family-transfer` after a code review found defects that had been
+`bible-mt-family-transfer-v1` after a code review found defects that had been
 live during the same-script series v1; the findings and their fixes are
 documented in that repo's `experiments/code-review-findings.md`. Earlier
 vendored copies in `bible-interlingua` and `m2m_bible_mt` predate the fixes.
