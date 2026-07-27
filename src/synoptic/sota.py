@@ -90,6 +90,45 @@ class SotaSpec:
         return [self.src_project, self.trg_project, *[p for _, p in self.extra_projects]]
 
 
+def _silnlp_master_vrefs() -> list[str] | None:
+    """silnlp's master ``vref.txt`` lines, or None if silnlp isn't importable."""
+    try:
+        import silnlp
+    except ImportError:
+        return None
+    vref = Path(silnlp.__file__).parent / "assets" / "vref.txt"
+    if not vref.exists():
+        return None
+    return vref.read_text(encoding="utf-8").splitlines()
+
+
+def _assert_vref_alignment(index: list[str]) -> None:
+    """Fail loudly if the corpus vref order won't line up with silnlp's.
+
+    silnlp maps each test/train vref to a line number in its master
+    ``vref.txt``, so an extract written in corpus-index order is only correct
+    if that order matches silnlp's exactly. Where silnlp is importable (the box
+    that builds SOTA runs) we compare the full list; otherwise we fall back to
+    the standard eBible invariants (a mismatch means re-verify against silnlp).
+    """
+    master = _silnlp_master_vrefs()
+    if master is not None:
+        if index != master:
+            n = min(len(index), len(master))
+            first_diff = next((i for i in range(n) if index[i] != master[i]), n)
+            raise SystemExit(
+                f"corpus vref order differs from silnlp's vref.txt "
+                f"(len {len(index)} vs {len(master)}; first diff at line "
+                f"{first_diff}); extracts would misalign — do not export"
+            )
+        return
+    if not index or index[0] != "GEN 1:1":
+        raise SystemExit(
+            f"corpus vref index looks wrong (len={len(index)}, "
+            f"first={index[:1]}); cannot confirm alignment to silnlp's vref.txt"
+        )
+
+
 def export_scripture(translation_ids: list[str], scripture_dir: Path) -> list[Path]:
     """Write vref-aligned ``<iso>-<project>.txt`` extracts from the corpus.
 
@@ -101,15 +140,7 @@ def export_scripture(translation_ids: list[str], scripture_dir: Path) -> list[Pa
     scripture_dir.mkdir(parents=True, exist_ok=True)
     meta = load_metadata().set_index("translationId")
     verses = load_verses(sorted(set(translation_ids)))
-    # silnlp maps each vref to a line number in its master vref.txt, so the
-    # extracts must be line-for-line aligned to that ordering. The corpus index
-    # is that ordering; assert it is intact rather than trust it silently.
-    n = len(verses.index)
-    if n == 0 or verses.index[0] != "GEN 1:1":
-        raise SystemExit(
-            f"corpus vref index looks wrong (len={n}, first={verses.index[:1].tolist()}); "
-            "extracts would misalign to silnlp's vref.txt"
-        )
+    _assert_vref_alignment(list(verses.index))
     written = []
     for tid in sorted(set(translation_ids)):
         iso = meta.at[tid, "languageCode"]
