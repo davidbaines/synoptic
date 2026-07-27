@@ -137,13 +137,29 @@ def _maybe_clearml(
         # The queue's default image (python:3.12-bullseye) breaks the agent
         # bootstrap (clearml-agent 2.0.4 imports pkg_resources, dropped by
         # setuptools>=81); a task-specified image sidesteps it.
+        docker_args = [
+            # ie_big at batch 256 died with 5.6 GiB reserved-but-unallocated;
+            # expandable segments avoids that fragmentation on long batches.
+            "-e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True",
+        ]
+        # The workers route to the MinIO store's LAN IP but have no DNS for
+        # its hostname, while the store cert is valid ONLY for the hostname.
+        # Map the hostname to its IP in the container's hosts file (resolved
+        # here, where DNS works) so the upload connects by the cert-valid
+        # hostname to the routable IP — full TLS, no hardcoded IP.
+        import socket
+        from urllib.parse import urlparse
+
+        host = urlparse(MINIO_ENDPOINT).hostname
+        try:
+            ip = socket.gethostbyname(host)
+            docker_args.append(f"--add-host {host}:{ip}")
+        except OSError:
+            print(f"  WARNING: could not resolve {host} locally; the worker "
+                  "may be unable to reach the weights store")
         task.set_base_docker(
             docker_image=docker_image or DEFAULT_DOCKER_IMAGE,
-            docker_arguments=(
-                # ie_big at batch 256 died with 5.6 GiB reserved-but-unallocated;
-                # expandable segments avoids that fragmentation on long batches.
-                "-e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
-            ),
+            docker_arguments=" ".join(docker_args),
         )
         # Enqueue and exit locally; the agent reruns the whole script remotely.
         task.execute_remotely(queue_name=remote_queue, exit_process=True)
