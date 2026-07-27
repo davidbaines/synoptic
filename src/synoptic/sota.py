@@ -235,12 +235,15 @@ def write_experiment(spec: SotaSpec, collect_dir: Path,
     return exp_dir
 
 
-def run(exp_name: str, rel_root: str, queue: str | None = None) -> list[str]:
+def run(exp_name: str, rel_root: str, queue: str | None = None,
+        clearml_tag: str = "research") -> list[str]:
     """Build the silnlp argv to preprocess/train/test one baseline, per book.
 
     The experiment path comes first (before ``--scorers``, whose nargs='*'
-    would otherwise swallow it) and ``--scorers chrf3`` comes last. Returns
-    the argv; the caller runs it, gated on free workers.
+    would otherwise swallow it) and ``--scorers chrf3`` comes last. silnlp
+    requires ``--clearml-tag`` (one of research/dev/eitl/onboarding) on any
+    queued run; these SOTA baselines are tagged ``research``. Returns the
+    argv; the caller runs it, gated on free workers.
     """
     argv = [
         "python", "-m", "silnlp.nmt.experiment",
@@ -248,6 +251,6 @@ def run(exp_name: str, rel_root: str, queue: str | None = None) -> list[str]:
         "--preprocess", "--train", "--test", "--score-by-book",
     ]
     if queue:
-        argv += ["--clearml-queue", queue]
+        argv += ["--clearml-queue", queue, "--clearml-tag", clearml_tag]
     argv += ["--scorers", "chrf3"]
     return argv

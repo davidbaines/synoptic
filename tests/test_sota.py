@@ -61,6 +61,7 @@ def test_run_argv_flags_and_ordering():
     assert argv.index("synoptic-sota/x/exp1") < argv.index("--scorers")
     assert argv[-2:] == ["--scorers", "chrf3"]
     assert "--clearml-queue" in argv and "jobs_backlog" in argv
+    assert argv[argv.index("--clearml-tag") + 1] == "research"
 
 
 def test_export_scripture_writes_vref_aligned(tmp_path, monkeypatch):
