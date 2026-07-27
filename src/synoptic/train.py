@@ -484,7 +484,11 @@ def run(args) -> None:
         gargs = SimpleNamespace(beam=0, max_length=0, batch_size=args.gen_batch_size)
         generate_holdouts(output, output / "generated", gargs)
 
-    _upload_artifacts(output, cfg)
+    if not args.overfit:
+        # Overfit is a debug mode (N pairs); its weights must never reach the
+        # store — upload_run clears the prefix first and would replace a real
+        # same-named model with garbage. Gated exactly like preflight.
+        _upload_artifacts(output, cfg)
 
     if args.overfit:
         loss = metrics.get("eval_loss", float("inf"))

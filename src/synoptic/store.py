@@ -160,14 +160,27 @@ def upload_run(output: Path, repo: str, run: str) -> None:
         raise SystemExit("MINIO_* credentials are not set; cannot store weights")
     prefix = run_prefix(repo, run)
 
-    # Clear any prior attempt's objects under this prefix.
-    existing = s3.list_objects_v2(Bucket=BUCKET, Prefix=prefix).get("Contents", [])
-    if existing:
-        s3.delete_objects(
-            Bucket=BUCKET,
-            Delete={"Objects": [{"Key": o["Key"]} for o in existing]},
-        )
-        print(f"  cleared {len(existing)} stale object(s) under {prefix}")
+    # Clear any prior attempt's objects under this prefix so a re-run cannot
+    # mix new files with stale shards. Retried like every other store op, and
+    # paginated + batched so it is correct beyond 1000 objects.
+    cleared = 0
+
+    def _clear() -> None:
+        nonlocal cleared
+        paginator = s3.get_paginator("list_objects_v2")
+        keys = [o["Key"] for page in paginator.paginate(Bucket=BUCKET, Prefix=prefix)
+                for o in page.get("Contents", [])]
+        for i in range(0, len(keys), 1000):
+            s3.delete_objects(
+                Bucket=BUCKET,
+                Delete={"Objects": [{"Key": k} for k in keys[i:i + 1000]]},
+            )
+        cleared = len(keys)
+
+    if not _retry(_clear, f"clear prefix {prefix}"):
+        raise SystemExit(f"could not clear {BUCKET}/{prefix} before upload")
+    if cleared:
+        print(f"  cleared {cleared} stale object(s) under {prefix}")
 
     manifest = build_manifest(output)
     print(f"  uploading {manifest['count']} files "
