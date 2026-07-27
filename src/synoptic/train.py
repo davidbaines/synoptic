@@ -52,6 +52,10 @@ from .tokenizer import load_tokenizer, train_tokenizer
 # 5-6 died on libcudnn.so.9 exactly that way).
 DEFAULT_DOCKER_IMAGE = "pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime"
 BUCKET = "nlp-research"
+# The cert is valid ONLY for this hostname (no IP SAN); the ClearML agents
+# inject the store as a bare IP, which fails TLS hostname verification, so we
+# always connect by the canonical hostname (it resolves to that same LAN IP).
+MINIO_ENDPOINT = "https://truenas.psonet.languagetechnology.org:9000"
 
 
 def _maybe_clearml(
@@ -167,11 +171,10 @@ def _upload_artifacts(output: Path, cfg: ExperimentConfig) -> None:
         # Local runs already have their weights on disk; only agent runs
         # (ephemeral containers) need to ship them to the store.
         return
-    endpoint = os.environ.get("MINIO_ENDPOINT_URL")
     access = os.environ.get("MINIO_ACCESS_KEY")
     secret = os.environ.get("MINIO_SECRET_KEY")
-    if not (endpoint and access and secret):
-        print("  WARNING: MINIO_* environment not set; weights stay on this "
+    if not (access and secret):
+        print("  WARNING: MINIO_* credentials not set; weights stay on this "
               "machine only (scores remain in the console log)")
         return
     try:
@@ -182,7 +185,7 @@ def _upload_artifacts(output: Path, cfg: ExperimentConfig) -> None:
         return
 
     s3 = boto3.client(
-        "s3", endpoint_url=endpoint,
+        "s3", endpoint_url=MINIO_ENDPOINT,
         aws_access_key_id=access, aws_secret_access_key=secret,
     )
     prefix = f"MT/experiments/synoptic/{cfg.root.name}/{output.name}"

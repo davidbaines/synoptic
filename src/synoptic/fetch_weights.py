@@ -22,6 +22,8 @@ from .chunks import MANIFEST_ARTIFACT, join_files
 from .data import repo_root
 
 BUCKET = "nlp-research"
+# Cert is hostname-only (no IP SAN); connect by the canonical hostname.
+MINIO_ENDPOINT = "https://truenas.psonet.languagetechnology.org:9000"
 
 
 def fetch_s3(run: str, out_dir: Path, repo: str | None = None) -> Path:
@@ -30,12 +32,11 @@ def fetch_s3(run: str, out_dir: Path, repo: str | None = None) -> Path:
 
     import boto3
 
-    endpoint = os.environ.get("MINIO_ENDPOINT_URL")
     access = os.environ.get("MINIO_ACCESS_KEY")
     secret = os.environ.get("MINIO_SECRET_KEY")
-    if not (endpoint and access and secret):
-        raise SystemExit("MINIO_* environment variables are not set")
-    s3 = boto3.client("s3", endpoint_url=endpoint,
+    if not (access and secret):
+        raise SystemExit("MINIO_* credentials are not set")
+    s3 = boto3.client("s3", endpoint_url=MINIO_ENDPOINT,
                       aws_access_key_id=access, aws_secret_access_key=secret)
     repo = repo or repo_root().name
     prefix = f"MT/experiments/synoptic/{repo}/{run}/"
