@@ -1,5 +1,8 @@
 import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 from synoptic import store
 
@@ -91,5 +94,52 @@ def test_remote_addresses_bucket_and_prefix():
 
 
 def test_ensure_rclone_prefers_path(monkeypatch):
+    monkeypatch.setattr(store, "_RCLONE_PATH", None)  # bypass the process cache
     monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/rclone")
     assert store._ensure_rclone() == "/usr/bin/rclone"
+
+
+def test_pinned_rclone_hashes_present_for_common_arches():
+    # The runtime fetch verifies against these; a missing arch means we would
+    # refuse to install rather than run an unverified binary.
+    assert set(store.RCLONE_SHA256) >= {"amd64", "arm64"}
+    assert all(len(h) == 64 for h in store.RCLONE_SHA256.values())
+
+
+def test_write_file_list_one_path_per_line(tmp_path):
+    lf = store._write_file_list(["a.txt", "sub/b.bin"], tmp_path)
+    assert lf.read_text().splitlines() == ["a.txt", "sub/b.bin"]
+
+
+def _proc(rc, out=b"", err=b""):
+    return subprocess.CompletedProcess(args=["rclone"], returncode=rc,
+                                       stdout=out, stderr=err)
+
+
+def test_download_run_reports_absent_run_cleanly(monkeypatch, tmp_path):
+    # rclone cat of a genuinely-absent manifest: rc 0, empty stdout AND stderr.
+    monkeypatch.setattr(store, "_rclone_env", lambda: {})
+    monkeypatch.setattr(store, "_rclone_once", lambda *a, **k: _proc(0, b"", b""))
+    with pytest.raises(SystemExit) as ei:
+        store.download_run("repo", "run", tmp_path)
+    assert "absent" in str(ei.value) or "never completed" in str(ei.value)
+
+
+def test_download_run_distinguishes_store_error_from_absent(monkeypatch, tmp_path):
+    # A 403/auth or DNS error must NOT be misreported as a missing run.
+    monkeypatch.setattr(store, "_rclone_env", lambda: {})
+    monkeypatch.setattr(
+        store, "_rclone_once",
+        lambda *a, **k: _proc(1, b"", b"CRITICAL: api error Forbidden: Forbidden"))
+    with pytest.raises(SystemExit) as ei:
+        store.download_run("repo", "run", tmp_path)
+    msg = str(ei.value)
+    assert "store/credential/network error" in msg and "Forbidden" in msg
+
+
+def test_download_run_rejects_corrupt_manifest(monkeypatch, tmp_path):
+    monkeypatch.setattr(store, "_rclone_env", lambda: {})
+    monkeypatch.setattr(store, "_rclone_once", lambda *a, **k: _proc(0, b"not json{", b""))
+    with pytest.raises(SystemExit) as ei:
+        store.download_run("repo", "run", tmp_path)
+    assert "not valid JSON" in str(ei.value)

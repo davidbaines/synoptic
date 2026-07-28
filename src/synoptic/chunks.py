@@ -2,9 +2,14 @@
 
 The ClearML file server kills large uploads unreliably (SSL EOF), with a
 failure threshold that drifts between roughly 50 MB and 400 MB from day to
-day. Run archives are ~1.5 GB, so ``train`` uploads them as numbered parts
-small enough to stay reliable, plus a checksum manifest, and
-``fetch_weights`` reassembles and verifies them.
+day. Run archives are ~1.5 GB, so uploads were split into numbered parts
+small enough to stay reliable, plus a checksum manifest.
+
+LEGACY: as of v0.4.0 ``store`` uploads to MinIO with rclone (5 GB files in one
+pass), so nothing splits anymore — ``split_file``/``PART_SIZE`` have no live
+producer. This module survives only so ``fetch_weights.fetch_chunked`` can
+recover runs uploaded by the older chunked-artifact path (and ``store`` reuses
+``sha256_file`` from here). Do not build new callers on the split side.
 """
 
 from __future__ import annotations
