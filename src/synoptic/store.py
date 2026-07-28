@@ -65,10 +65,11 @@ STORE_ROOT = "MT/experiments/synoptic"
 # what a run stores; the rclone copy is driven from the manifest built off it
 # (--files-from), so there is no second, divergent rule.
 #
-# checkpoint-* is a prefix match (checkpoint-500, checkpoint-1000, ...); best is
-# matched EXACTLY, not as a prefix — otherwise a legitimate artifact like
-# best_metrics.json would be silently dropped from both the manifest and the
-# upload.
+# These name DIRECTORIES to skip (see _is_skipped, which matches ancestor dir
+# components only): checkpoint-* by prefix (checkpoint-500, checkpoint-1000,
+# ...) and best by exact name. Matching directories — not any path part —
+# means a run-root file like checkpoint-summary.json or best_metrics.json is
+# kept, not silently dropped from the manifest and the upload.
 SKIP_DIR_PREFIXES = ("checkpoint-",)
 SKIP_DIR_NAMES = ("best",)
 
@@ -247,10 +248,16 @@ def _rclone(args: list[str], env: dict, what: str, *, input: bytes | None = None
 
 
 def _is_skipped(rel: Path) -> bool:
-    """True if any path part is a skipped checkpoint dir or the best/ duplicate."""
-    return any(
-        part.startswith(pre) for part in rel.parts for pre in SKIP_DIR_PREFIXES
-    ) or any(part in SKIP_DIR_NAMES for part in rel.parts)
+    """True if the file lives under a skipped checkpoint dir or the best/ dir.
+
+    Matches ANCESTOR DIRECTORY components only (``rel.parts[:-1]``), never the
+    filename: checkpoints and best/ are always directories, so a real run-root
+    artifact like ``checkpoint-summary.json`` or ``best_metrics.json`` is kept
+    rather than silently dropped from both the manifest and the upload.
+    """
+    dirs = rel.parts[:-1]
+    return any(d.startswith(pre) for d in dirs for pre in SKIP_DIR_PREFIXES) \
+        or any(d in SKIP_DIR_NAMES for d in dirs)
 
 
 def run_files(output: Path) -> list[Path]:
@@ -343,6 +350,12 @@ def upload_run(output: Path, repo: str, run: str) -> None:
     manifest's files (``--files-from``), then writes the manifest — its presence
     is the signal that the run is complete, so ``download_run`` refuses a run
     without one.
+
+    Two workers uploading the SAME repo/run concurrently (e.g. a ClearML retry)
+    can make one see the other's purge mid-flight and fail its ``lsf`` check, or
+    make a concurrent download fail ``manifest_problems``; every such race fails
+    LOUD and is resolved by a retry — it can never leave a manifest present over
+    an incomplete file set. Same-run concurrency is not expected in normal use.
     """
     env = _rclone_env()
     if env is None:
@@ -403,16 +416,19 @@ def download_run(repo: str, run: str, out_dir: Path) -> Path:
     if env is None:
         raise SystemExit("MINIO_* credentials are not set; cannot fetch weights")
     prefix = run_prefix(repo, run)
-    # Read the manifest first, through the retry wrapper. rclone cat of a
-    # genuinely-absent object exits 0 with empty stdout (so _rclone returns it
-    # without retrying — a fast, clean "absent" answer); a store/credential/
-    # network error or a mid-stream drop exits non-zero, so _rclone retries the
-    # blip and, if it persists, raises with the descriptive label below rather
-    # than feeding a truncated body to json.loads.
+    # Read the manifest first, through the retry wrapper. An absent manifest is
+    # the common "not yet uploaded" poll and must answer fast: rclone cat of a
+    # missing object exits either 0 with empty stdout (observed on this MinIO)
+    # or non-zero "directory not found" (some backends) — both are tolerated so
+    # _rclone returns immediately with empty stdout rather than retrying, the
+    # same absent-prefix hedge purge uses. A real store/credential/network error
+    # or a mid-stream drop carries a different message, so _rclone retries the
+    # blip and, if it persists, raises the descriptive label below rather than
+    # feeding a truncated body to json.loads.
     proc = _rclone(["cat", _remote(f"{prefix}{MANIFEST_NAME}")], env,
                    f"read run {run} manifest at {BUCKET}/{prefix}{MANIFEST_NAME} "
                    "(a store/credential/network error, not a missing run)",
-                   attempts=3)
+                   attempts=3, tolerate=("directory not found",))
     if not proc.stdout.strip():
         raise SystemExit(
             f"no manifest at {BUCKET}/{prefix}{MANIFEST_NAME}: the run is "

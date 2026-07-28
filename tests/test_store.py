@@ -147,19 +147,36 @@ def test_download_run_rejects_corrupt_manifest(monkeypatch, tmp_path):
     assert "not valid JSON" in str(ei.value)
 
 
-def test_run_files_keeps_best_prefixed_files_but_drops_best_dir(tmp_path):
-    # 'best' is skipped as an EXACT path component (the best/ duplicate), not as
-    # a prefix — a real artifact like best_metrics.json must be kept, else it is
-    # silently dropped from both the manifest and the --files-from upload.
+def test_run_files_skips_checkpoint_and_best_dirs_only(tmp_path):
+    # Only files UNDER a checkpoint-*/best directory are skipped; run-root files
+    # whose name merely starts with those tokens are real artifacts and kept,
+    # else they are silently dropped from both the manifest and the upload.
     out = tmp_path / "run"
     (out / "best").mkdir(parents=True)
-    (out / "best" / "model.safetensors").write_bytes(b"dup")   # dropped: best/ dir
+    (out / "best" / "model.safetensors").write_bytes(b"dup")   # dropped: under best/
     (out / "checkpoint-9").mkdir()
-    (out / "checkpoint-9" / "opt.pt").write_bytes(b"o")        # dropped: checkpoint dir
-    (out / "best_metrics.json").write_text("{}")               # KEPT: not exactly 'best'
+    (out / "checkpoint-9" / "opt.pt").write_bytes(b"o")        # dropped: under checkpoint-*/
+    (out / "best_metrics.json").write_text("{}")               # KEPT: root file, not a dir
+    (out / "checkpoint-summary.json").write_text("{}")         # KEPT: root file, not a dir
     (out / "model.safetensors").write_bytes(b"w")
     rels = {str(f.relative_to(out)) for f in store.run_files(out)}
-    assert rels == {"best_metrics.json", "model.safetensors"}
+    assert rels == {"best_metrics.json", "checkpoint-summary.json", "model.safetensors"}
+
+
+def test_download_run_treats_directory_not_found_as_absent(monkeypatch, tmp_path):
+    # Some rclone backends report an absent manifest as rc!=0 "directory not
+    # found" (rather than rc 0 / empty); that must still be a clean, fast
+    # "absent run", not a retried store error.
+    monkeypatch.setattr(store, "_rclone_env", lambda: {})
+    monkeypatch.setattr(store.time, "sleep", lambda s: None)
+    monkeypatch.setattr(
+        store, "_rclone_once",
+        lambda *a, **k: _proc(3, b"", b"2026/... ERROR: directory not found"))
+    with pytest.raises(SystemExit) as ei:
+        store.download_run("repo", "run", tmp_path)
+    msg = str(ei.value)
+    assert "absent" in msg or "never completed" in msg
+    assert "store/credential/network error" not in msg
 
 
 def _recording_rclone(out_dir, calls):
