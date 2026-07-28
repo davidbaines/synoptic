@@ -70,8 +70,11 @@ def test_package_tokenizer_roundtrips(tmp_path):
 
 
 def test_model_card_has_key_sections():
-    lic = pd.DataFrame({"translationId": ["spablm"], "languageCode": ["spa"],
-                        "licence": ["Public Domain"]})
+    # licences must carry the target (engbsb -> eng) so the usage example can
+    # print this model's real target tag, not a placeholder.
+    lic = pd.DataFrame(
+        {"translationId": ["hin2017", "engbsb"], "languageCode": ["hin", "eng"],
+         "licence": ["Public Domain", "Public Domain"]})
     metrics = pd.DataFrame({"translation": ["engbsb"], "language": ["eng"],
                             "book": ["GEN"], "verses": [100],
                             "chrF3": [30.0], "copy_chrF3": [1.0],
@@ -86,3 +89,30 @@ def test_model_card_has_key_sections():
     assert "from_pretrained" in card
     assert "engbsb" in card
     assert "abc123" in card
+    # usage example uses the real target tag (<2eng>) + source tag (<1hin>),
+    # never the old hardcoded <2spa> placeholder that would mislead users.
+    assert "<2eng>" in card
+    assert "<1hin>" in card
+    assert "<2spa>" not in card
+
+
+def test_model_card_target_tag_follows_target_not_source():
+    # a run whose target differs from any Spanish/source language: the example
+    # must show the target's tag, proving it is derived, not hardcoded.
+    lic = pd.DataFrame(
+        {"translationId": ["gmve", "gofe"], "languageCode": ["gmv", "gof"],
+         "licence": ["by-sa", "by-sa"]})
+    metrics = pd.DataFrame({"translation": ["gofe"], "language": ["gof"],
+                            "book": ["MRK"], "verses": [673],
+                            "chrF3": [57.4], "copy_chrF3": [10.6],
+                            "other_chrF3": [14.3], "other_lang": ["oyd"]})
+    card = build_model_card(
+        repo_id="DavidCBaines/ebible_m2m-ms8-ethiopic-gapfill-gof",
+        experiment="ms8_ethiopic_gapfill_gof", n_params=210_000_000,
+        licences=lic, holdouts={"gofe": ["MRK"]},
+        verse_holdouts={"gofe": ["GEN 1:1"]},
+        metrics=metrics, model_licence="cc-by-sa-4.0", git_commit="abc123",
+        seed=13, source_id="gmve", source_lang="gmv", source_name="Gamo",
+    )
+    assert 'source = "<2gof> <1gmv>' in card
+    assert "<2spa>" not in card

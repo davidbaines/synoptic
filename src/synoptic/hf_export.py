@@ -118,6 +118,24 @@ def build_model_card(
     tags = ["translation", "bible", "marian", "multilingual", "from-scratch"]
     header = _yaml_metadata(languages, model_licence, tags)
 
+    # The model emits a target tag <2<iso>>, where <iso> is the target's
+    # languageCode (NOT its translationId). Derive the real target tag(s) from
+    # the held-out targets so the usage example is correct for this model —
+    # never a generic placeholder that would make copy-paste output wrong.
+    tid_to_lang = dict(zip(licences["translationId"], licences["languageCode"]))
+    target_langs = []
+    for t in list(holdouts) + list(verse_holdouts or {}):
+        lc = tid_to_lang.get(t)
+        if lc and lc not in target_langs:
+            target_langs.append(lc)
+    example_target = target_langs[0] if target_langs else "xxx"
+    target_note = (
+        f"this model's target tag `<2{example_target}>`"
+        if len(target_langs) <= 1
+        else "one of this model's target tags "
+        + ", ".join(f"`<2{lc}>`" for lc in target_langs)
+    )
+
     holdout_lines = "\n".join(
         f"| `{t}` | {', '.join(b)} |" for t, b in holdouts.items()
     )
@@ -152,10 +170,10 @@ from transformers import MarianMTModel, MarianTokenizer
 model = MarianMTModel.from_pretrained("{repo_id}")
 tokenizer = MarianTokenizer.from_pretrained("{repo_id}")
 
-# Prepend the target language tag (for example <2spa>), then one or more
-# language-tagged source renderings of the verse. This run's forced-first
-# source is {source_name} (`{source_id}`, tag <1{source_lang}>).
-source = "<2spa> <1{source_lang}> ...verse text in {source_name}..."
+# Prepend {target_note}, then one or more language-tagged source renderings
+# of the verse. This run's forced-first source is {source_name}
+# (`{source_id}`, tag <1{source_lang}>).
+source = "<2{example_target}> <1{source_lang}> ...verse text in {source_name}..."
 batch = tokenizer([source], return_tensors="pt")
 generated = model.generate(**batch, num_beams=5, max_length=192)
 print(tokenizer.decode(generated[0], skip_special_tokens=True))
