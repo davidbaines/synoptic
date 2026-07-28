@@ -126,8 +126,10 @@ def test_download_run_reports_absent_run_cleanly(monkeypatch, tmp_path):
 
 
 def test_download_run_distinguishes_store_error_from_absent(monkeypatch, tmp_path):
-    # A 403/auth or DNS error must NOT be misreported as a missing run.
+    # A 403/auth or DNS error must NOT be misreported as a missing run. The
+    # manifest read retries (via _rclone), so stub the backoff sleep away.
     monkeypatch.setattr(store, "_rclone_env", lambda: {})
+    monkeypatch.setattr(store.time, "sleep", lambda s: None)
     monkeypatch.setattr(
         store, "_rclone_once",
         lambda *a, **k: _proc(1, b"", b"CRITICAL: api error Forbidden: Forbidden"))
@@ -143,3 +145,69 @@ def test_download_run_rejects_corrupt_manifest(monkeypatch, tmp_path):
     with pytest.raises(SystemExit) as ei:
         store.download_run("repo", "run", tmp_path)
     assert "not valid JSON" in str(ei.value)
+
+
+def test_run_files_keeps_best_prefixed_files_but_drops_best_dir(tmp_path):
+    # 'best' is skipped as an EXACT path component (the best/ duplicate), not as
+    # a prefix — a real artifact like best_metrics.json must be kept, else it is
+    # silently dropped from both the manifest and the --files-from upload.
+    out = tmp_path / "run"
+    (out / "best").mkdir(parents=True)
+    (out / "best" / "model.safetensors").write_bytes(b"dup")   # dropped: best/ dir
+    (out / "checkpoint-9").mkdir()
+    (out / "checkpoint-9" / "opt.pt").write_bytes(b"o")        # dropped: checkpoint dir
+    (out / "best_metrics.json").write_text("{}")               # KEPT: not exactly 'best'
+    (out / "model.safetensors").write_bytes(b"w")
+    rels = {str(f.relative_to(out)) for f in store.run_files(out)}
+    assert rels == {"best_metrics.json", "model.safetensors"}
+
+
+def _recording_rclone(out_dir, calls):
+    """A fake store._rclone that records subcommands and satisfies the lsf probe."""
+    def fake(args, env, what, *, input=None, attempts=4, tolerate=()):
+        calls.append(args[0])
+        stdout = b""
+        if args[0] == "lsf":  # completeness probe: report every stored file present
+            rels = [str(f.relative_to(out_dir)) for f in store.run_files(out_dir)]
+            stdout = ("\n".join(rels)).encode()
+        return _proc(0, stdout, b"")
+    return fake
+
+
+def test_upload_run_writes_manifest_last(tmp_path, monkeypatch):
+    out = tmp_path / "run"
+    (out / "tokenizer").mkdir(parents=True)
+    (out / "config.json").write_text("{}")
+    (out / "model.safetensors").write_bytes(b"w" * 20)
+    (out / "tokenizer" / "spm.model").write_bytes(b"sp")
+    calls: list[str] = []
+    monkeypatch.setattr(store, "_rclone_env", lambda: {})
+    monkeypatch.setattr(store, "_rclone", _recording_rclone(out, calls))
+    store.upload_run(out, "repo", "run")
+    assert calls[0] == "purge"                       # destination cleared first
+    assert "copy" in calls and "lsf" in calls
+    assert calls[-1] == "rcat"                       # manifest is the LAST write
+    assert calls.index("copy") < calls.index("rcat")
+    assert calls.index("lsf") < calls.index("rcat")  # completeness verified before manifest
+
+
+def test_upload_run_fails_loud_when_a_file_missing_from_store(tmp_path, monkeypatch):
+    out = tmp_path / "run"
+    out.mkdir()
+    (out / "config.json").write_text("{}")
+    (out / "model.safetensors").write_bytes(b"w" * 20)
+    calls: list[str] = []
+
+    def fake(args, env, what, *, input=None, attempts=4, tolerate=()):
+        calls.append(args[0])
+        stdout = b""
+        if args[0] == "lsf":  # copy "succeeded" but a file never reached the store
+            stdout = b"config.json"
+        return _proc(0, stdout, b"")
+
+    monkeypatch.setattr(store, "_rclone_env", lambda: {})
+    monkeypatch.setattr(store, "_rclone", fake)
+    with pytest.raises(SystemExit) as ei:
+        store.upload_run(out, "repo", "run")
+    assert "incomplete" in str(ei.value)
+    assert "rcat" not in calls  # manifest must NOT be written for an incomplete upload

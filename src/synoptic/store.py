@@ -38,7 +38,6 @@ hostname so TLS validates.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import platform
@@ -60,12 +59,18 @@ MINIO_ENDPOINT = "https://truenas.psonet.languagetechnology.org:9000"
 MINIO_REGION = "us-east-2"
 MANIFEST_NAME = "_synoptic_manifest.json"
 STORE_ROOT = "MT/experiments/synoptic"
-# Trainer checkpoints carry optimizer states; best/ duplicates the shipped
-# weights (the best checkpoint is reloaded to the run root before saving).
-# run_files applies this as a startswith on every path part; it is the ONLY
-# definition of what a run stores — the rclone copy is driven from the manifest
-# built off it (--files-from), so there is no second, divergent glob rule.
-SKIP_DIR_PREFIXES = ("checkpoint-", "best")
+# What a run does NOT store: trainer checkpoints (optimizer states) and the
+# best/ directory (a duplicate of the shipped weights — the best checkpoint is
+# reloaded to the run root before saving). run_files is the ONLY definition of
+# what a run stores; the rclone copy is driven from the manifest built off it
+# (--files-from), so there is no second, divergent rule.
+#
+# checkpoint-* is a prefix match (checkpoint-500, checkpoint-1000, ...); best is
+# matched EXACTLY, not as a prefix — otherwise a legitimate artifact like
+# best_metrics.json would be silently dropped from both the manifest and the
+# upload.
+SKIP_DIR_PREFIXES = ("checkpoint-",)
+SKIP_DIR_NAMES = ("best",)
 
 # Flags applied to every rclone invocation against the store. Centralised so a
 # store-wide change (endpoint option, retry budget, a CA flag on cert rotation)
@@ -142,6 +147,9 @@ def _ensure_rclone() -> str:
     global _RCLONE_PATH
     if _RCLONE_PATH:
         return _RCLONE_PATH
+    # An rclone already on PATH is trusted as-is (version/hash unchecked): the
+    # pin+SHA-256 guard covers the binary WE fetch onto a stock worker, not an
+    # operator's own install. A too-old PATH rclone fails loudly at preflight.
     found = shutil.which("rclone")
     if found:
         _RCLONE_PATH = found
@@ -238,14 +246,18 @@ def _rclone(args: list[str], env: dict, what: str, *, input: bytes | None = None
     raise SystemExit(f"{what} failed after {attempts} attempts: {last}")
 
 
+def _is_skipped(rel: Path) -> bool:
+    """True if any path part is a skipped checkpoint dir or the best/ duplicate."""
+    return any(
+        part.startswith(pre) for part in rel.parts for pre in SKIP_DIR_PREFIXES
+    ) or any(part in SKIP_DIR_NAMES for part in rel.parts)
+
+
 def run_files(output: Path) -> list[Path]:
     """Files of a run directory worth storing (skips checkpoints and best/)."""
     return [
         f for f in sorted(output.rglob("*"))
-        if f.is_file() and not any(
-            part.startswith(skip)
-            for part in f.relative_to(output).parts for skip in SKIP_DIR_PREFIXES
-        )
+        if f.is_file() and not _is_skipped(f.relative_to(output))
     ]
 
 
@@ -337,24 +349,44 @@ def upload_run(output: Path, repo: str, run: str) -> None:
         raise SystemExit("MINIO_* credentials are not set; cannot store weights")
     prefix = run_prefix(repo, run)
 
-    # Clear any prior attempt's objects. A purge of an absent prefix is fine
-    # (first run); any other failure is retried and then fails the run, because
-    # a half-cleared prefix could leak stale objects into an otherwise-complete
-    # run.
-    purge = _rclone(["purge", _remote(prefix)], env, f"clear prefix {prefix}",
-                    tolerate=("not found", "no such", "does not exist", "empty"))
-    if purge.returncode == 0:
-        print(f"  cleared stale objects under {prefix}")
+    # Clear any prior attempt's objects. A purge of an absent prefix succeeds
+    # (rc 0) on the store, so the only tolerated non-zero outcome is the exact
+    # "directory not found" message some rclone versions emit for an absent
+    # path; every other failure (auth, "no such host", a partial delete) is
+    # retried and then fails the run, because a half-cleared prefix could leak
+    # stale objects into an otherwise-complete run.
+    _rclone(["purge", _remote(prefix)], env, f"clear prefix {prefix}",
+            tolerate=("directory not found",))
+    print(f"  destination prefix {prefix} cleared")
 
     manifest = build_manifest(output)
+    rel_paths = [e["path"] for e in manifest["files"]]
     print(f"  uploading {manifest['count']} files "
           f"({manifest['total_bytes'] / 1e6:.0f} MB) to {BUCKET}/{prefix} ...")
     with tempfile.TemporaryDirectory() as td:
-        listfile = _write_file_list([e["path"] for e in manifest["files"]], Path(td))
+        listfile = _write_file_list(rel_paths, Path(td))
         _rclone(["copy", str(output), _remote(prefix),
                  "--files-from", str(listfile), "--transfers", "4", "--checkers", "8"],
                 env,
                 f"upload run {run} (run incomplete; scores remain in the console log)")
+
+    # rclone copy exits 0 even if a --files-from entry vanished between
+    # build_manifest and the copy (it silently skips it), so confirm every
+    # manifest file actually reached the store BEFORE writing the manifest.
+    # This restores the boto3 path's upload-time fail-loud (download would also
+    # catch it later, but naming the incomplete run here is far cheaper to act
+    # on). A metadata listing, not a re-hash — no extra read of the weights.
+    listed = _rclone(["lsf", "-R", "--files-only", _remote(prefix)], env,
+                     f"list stored files for run {run}").stdout.decode().split("\n")
+    stored = {p for p in listed if p}
+    missing = [p for p in rel_paths if p not in stored]
+    if missing:
+        raise SystemExit(
+            f"upload of run {run} is incomplete: {len(missing)} file(s) did not "
+            f"reach {BUCKET}/{prefix} (e.g. {missing[:3]}); NOT writing the "
+            "manifest, so the run is not mistaken for a stored model (scores "
+            "remain in the console log)"
+        )
 
     # Manifest last, with retries: it is the completeness signal and the single
     # most consequential write, yet the cheapest — it must not be the one op
@@ -371,19 +403,17 @@ def download_run(repo: str, run: str, out_dir: Path) -> Path:
     if env is None:
         raise SystemExit("MINIO_* credentials are not set; cannot fetch weights")
     prefix = run_prefix(repo, run)
-    # Read the manifest first. rclone cat of a genuinely-absent object exits 0
-    # with empty stdout AND empty stderr; a store/credential/network error exits
-    # non-zero or leaves an error on stderr. Distinguish the two so an auth or
-    # DNS failure is not misreported as "run never uploaded".
-    proc = _rclone_once(["cat", _remote(f"{prefix}{MANIFEST_NAME}")], env)
+    # Read the manifest first, through the retry wrapper. rclone cat of a
+    # genuinely-absent object exits 0 with empty stdout (so _rclone returns it
+    # without retrying — a fast, clean "absent" answer); a store/credential/
+    # network error or a mid-stream drop exits non-zero, so _rclone retries the
+    # blip and, if it persists, raises with the descriptive label below rather
+    # than feeding a truncated body to json.loads.
+    proc = _rclone(["cat", _remote(f"{prefix}{MANIFEST_NAME}")], env,
+                   f"read run {run} manifest at {BUCKET}/{prefix}{MANIFEST_NAME} "
+                   "(a store/credential/network error, not a missing run)",
+                   attempts=3)
     if not proc.stdout.strip():
-        err = _decode(proc)
-        if proc.returncode != 0 or err:
-            raise SystemExit(
-                f"cannot read the run manifest at {BUCKET}/{prefix}{MANIFEST_NAME}: "
-                f"{err or 'unknown rclone error'} — a store/credential/network "
-                "error, not a missing run"
-            )
         raise SystemExit(
             f"no manifest at {BUCKET}/{prefix}{MANIFEST_NAME}: the run is "
             "absent or its upload never completed (an incomplete run has no "
@@ -399,13 +429,16 @@ def download_run(repo: str, run: str, out_dir: Path) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"{run}: {manifest['count']} files "
           f"({manifest['total_bytes'] / 1e6:.0f} MB) from {BUCKET}/{prefix}")
-    # Fetch exactly the manifest's files (--files-from), so stale objects that
-    # somehow survive under the prefix are never pulled into the run directory.
-    with tempfile.TemporaryDirectory() as td:
-        listfile = _write_file_list([e["path"] for e in manifest["files"]], Path(td))
-        _rclone(["copy", _remote(prefix), str(out_dir),
-                 "--files-from", str(listfile), "--transfers", "4", "--checkers", "8"],
-                env, f"download run {run}")
+    # sync (not copy) so out_dir ends up mirroring the run EXACTLY: a reused
+    # out_dir (fetch_weights defaults to a stable checkpoints/<run>) cannot keep
+    # a stale file from a prior fetch that manifest_problems — which only checks
+    # that manifest files are present and correct — would not otherwise flag.
+    # The store prefix is clean (upload purges it and verifies completeness), so
+    # sync brings down exactly the run's files; the manifest object itself is
+    # excluded so out_dir contains only the manifest's listed files.
+    _rclone(["sync", _remote(prefix), str(out_dir),
+             "--exclude", MANIFEST_NAME, "--transfers", "4", "--checkers", "8"],
+            env, f"download run {run}")
     problems = manifest_problems(out_dir, manifest)
     if problems:
         raise SystemExit(f"downloaded run does not match its manifest: {problems}")
