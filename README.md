@@ -61,8 +61,11 @@ vendored copies in `bible-interlingua` and `m2m_bible_mt` predate the fixes.
 
 `v0.4.0` adds the `sota` module (silnlp NLLB-1.3B SOTA-baseline builder) and
 switches the weights store transport from boto3 to rclone (5 GB files in one
-pass, no chunking). `bible-mt-same-script` ran on `v0.3.1`; its completed runs
-are unaffected (the store layout and manifest contract are unchanged).
+pass, no chunking). `v0.4.1` is that transport after a three-round code review
+(retried purge/manifest-read, manifest-driven `--files-from` upload with a
+completeness check, `sync` download, pinned + SHA-256-verified rclone install);
+prefer it. `bible-mt-same-script` ran on `v0.3.1`; its completed runs are
+unaffected (the store layout and manifest contract are unchanged).
 
 Licence: Apache-2.0. Models trained on eBible shareable selections publish
 under cc-by-sa-4.0 (ShareAlike propagates from by-sa sources).
