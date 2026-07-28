@@ -1,3 +1,4 @@
+import shutil
 from pathlib import Path
 
 from synoptic import store
@@ -64,3 +65,31 @@ def test_manifest_problems_detects_missing_and_corrupt(tmp_path):
     (dest / "model.safetensors").write_bytes((out / "model.safetensors").read_bytes())
     (dest / "config.json").write_text("x" * len(good.read_text()))
     assert any("config.json" in p for p in store.manifest_problems(dest, m))
+
+
+def test_rclone_env_none_without_credentials(monkeypatch):
+    monkeypatch.delenv("MINIO_ACCESS_KEY", raising=False)
+    monkeypatch.delenv("MINIO_SECRET_KEY", raising=False)
+    assert store._rclone_env() is None
+
+
+def test_rclone_env_configures_s3_backend_from_minio_creds(monkeypatch):
+    monkeypatch.setenv("MINIO_ACCESS_KEY", "AK")
+    monkeypatch.setenv("MINIO_SECRET_KEY", "SK")
+    env = store._rclone_env()
+    # Secrets travel in the child env (RCLONE_S3_*), never on the argv.
+    assert env["RCLONE_S3_ACCESS_KEY_ID"] == "AK"
+    assert env["RCLONE_S3_SECRET_ACCESS_KEY"] == "SK"
+    assert env["RCLONE_S3_PROVIDER"] == "Minio"
+    assert env["RCLONE_S3_ENDPOINT"] == store.MINIO_ENDPOINT
+
+
+def test_remote_addresses_bucket_and_prefix():
+    # On-the-fly :s3: remote (backend config comes from the env, not the path).
+    assert store._remote("MT/x/r/") == ":s3:nlp-research/MT/x/r/"
+    assert store._remote() == ":s3:nlp-research/"
+
+
+def test_ensure_rclone_prefers_path(monkeypatch):
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/rclone")
+    assert store._ensure_rclone() == "/usr/bin/rclone"

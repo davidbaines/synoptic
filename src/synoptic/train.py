@@ -111,7 +111,9 @@ def _maybe_clearml(
         # index resolution, as the v1 captures did.
         from importlib import metadata
 
-        for pkg in ("torch", "transformers", "accelerate", "matplotlib", "boto3"):
+        # boto3 is gone: the store transport is rclone (a static binary fetched
+        # at runtime by store._ensure_rclone), not a pip dependency.
+        for pkg in ("torch", "transformers", "accelerate", "matplotlib"):
             try:
                 Task.add_requirements(pkg, metadata.version(pkg))
             except metadata.PackageNotFoundError:

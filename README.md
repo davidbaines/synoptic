@@ -27,10 +27,15 @@ code originally inspired by Sami Liedes' Bible-MT experiments.
 - **Evaluation**: chrF3-family metrics, copy and best-other-language
   baselines, per-book and named-test-set reporting (`evaluate`, `generate`,
   `sheets`).
-- **Run plumbing**: ClearML remote execution, chunked artifact upload (the
-  file server rejects uploads above ~200 MB), score and weight recovery
-  (`fetch_scores`, `fetch_weights`), HF export with correct source-language
-  metadata (`hf_export`, `publish`).
+- **Run plumbing**: ClearML remote execution; run weights/outputs transported
+  to the shared MinIO store with **rclone** (`store`) — it streams multi-GB
+  checkpoints in one pass, so no chunking is needed (the ClearML file server,
+  which drops bulk uploads, is not used; the legacy chunked-artifact path in
+  `chunks`/`fetch_weights` survives only to recover pre-store runs). rclone is
+  configured on the fly from the `MINIO_*` env vars already on the worker and
+  is fetched at runtime if not on `PATH`, so the stock image needs nothing
+  baked in. Score and weight recovery (`fetch_scores`, `fetch_weights`), HF
+  export with correct source-language metadata (`hf_export`, `publish`).
 
 ## Use from an experiment repo
 
@@ -53,6 +58,11 @@ Extracted 2026-07-26 from the (fixed) vendored copy in
 live during the same-script series v1; the findings and their fixes are
 documented in that repo's `experiments/code-review-findings.md`. Earlier
 vendored copies in `bible-interlingua` and `m2m_bible_mt` predate the fixes.
+
+`v0.4.0` adds the `sota` module (silnlp NLLB-1.3B SOTA-baseline builder) and
+switches the weights store transport from boto3 to rclone (5 GB files in one
+pass, no chunking). `bible-mt-same-script` ran on `v0.3.1`; its completed runs
+are unaffected (the store layout and manifest contract are unchanged).
 
 Licence: Apache-2.0. Models trained on eBible shareable selections publish
 under cc-by-sa-4.0 (ShareAlike propagates from by-sa sources).
