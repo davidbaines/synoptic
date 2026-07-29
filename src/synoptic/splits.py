@@ -51,6 +51,7 @@ def build_splits(
     valid_size: int = 5000,
     seed: int = 13,
     verse_holdouts: Mapping[str, Iterable[str]] | None = None,
+    reserve_per_holdout: int = 0,
 ) -> Splits:
     """Split a vref-indexed wide verse table into train/valid/test pairs.
 
@@ -58,6 +59,18 @@ def build_splits(
     ``verse_holdouts`` maps translationId -> explicit vrefs (partial-book test
     sets such as Genesis-250). Empty cells and ``<range>`` markers are dropped
     before splitting, so every pair in the result has usable text.
+
+    ``reserve_per_holdout`` guarantees the per-target validation set is
+    satisfiable. The validation set (``validation.build_validation_set``) draws
+    ``verses_per_language`` verses per *held-out* translation from the valid
+    split; a purely global ``valid_size`` sample under-represents those targets
+    whenever the pool is dominated by fully-present companion translations (a
+    14-translation family with 2 held-out targets gives each target ~1.8% of the
+    sample, far below 250). When >0, that many of each holdout translation's
+    non-test verses are reserved into the valid split first; the remaining
+    ``valid_size`` (for logged eval loss) is then drawn from what is left. The
+    default 0 keeps the original global-only behaviour for callers that do not
+    build a per-target validation set.
 
     Holdout keys and vrefs are validated: an unknown translation id, a vref
     absent from the corpus index, or a verse holdout that matches nothing
@@ -107,11 +120,27 @@ def build_splits(
     test = long[test_mask].reset_index(drop=True)
     rest = long[~test_mask]
 
-    if valid_size >= len(rest):
+    # Reserve per-target validation verses first (see reserve_per_holdout in the
+    # docstring), so a global sample can never starve a held-out target.
+    reserved = rest.iloc[0:0]
+    if reserve_per_holdout > 0:
+        holdout_ids = set(holdouts) | set(verse_holdouts or {})
+        parts = []
+        for translation in sorted(holdout_ids):
+            sub = rest[rest["translation"] == translation]
+            n = min(reserve_per_holdout, len(sub))
+            if n:
+                parts.append(sub.sample(n=n, random_state=seed))
+        if parts:
+            reserved = pd.concat(parts)
+
+    remainder = rest.drop(reserved.index)
+    if valid_size >= len(remainder):
         raise ValueError(
-            f"valid_size {valid_size} would consume all {len(rest)} training pairs"
+            f"valid_size {valid_size} would consume all {len(remainder)} training "
+            f"pairs (after reserving {len(reserved)} per-target validation verses)"
         )
-    valid = rest.sample(n=valid_size, random_state=seed)
+    valid = pd.concat([reserved, remainder.sample(n=valid_size, random_state=seed)])
     train = rest.drop(valid.index).reset_index(drop=True)
     valid = valid.reset_index(drop=True)
     return Splits(train=train, valid=valid, test=test)

@@ -111,9 +111,13 @@ def prepare(cfg: ExperimentConfig) -> PreparedData:
             f"The source translation {source_id!r} appears in the holdouts — "
             f"a held-out source would leak its test text into every pair"
         )
+    # Guarantee the per-target validation set (verses_per_language per held-out
+    # translation) is satisfiable regardless of how the companion pool dilutes
+    # a global valid sample; 0 when no validation set is built.
+    reserve = cfg.validation.verses_per_language if cfg.validation is not None else 0
     splits = build_splits(
         verses, holdouts, valid_size=valid_size, seed=seed,
-        verse_holdouts=verse_holdouts,
+        verse_holdouts=verse_holdouts, reserve_per_holdout=reserve,
     )
     if cfg.data.pairing == "one-to-many" and source_id in verses.columns:
         # Single-source baselines with an in-pool source: the source cannot be

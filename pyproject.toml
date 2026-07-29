@@ -1,6 +1,6 @@
 [project]
 name = "synoptic"
-version = "0.4.1"
+version = "0.4.2"
 description = "Multi-source Bible MT toolkit for the closed-text series (data pipeline, training, evaluation)"
 readme = "README.md"
 requires-python = ">=3.11"
